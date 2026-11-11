@@ -122,6 +122,41 @@ Running an open endpoint in production therefore requires typing `AUTH_OPTIONAL=
 
 Access and refresh tokens live in `sessionStorage`, so they are script-readable and an XSS bug would expose them; they are at least scoped to the tab and die with it. This is the standard SPA tradeoff and it buys the stateless, one-variable deploy. If that is not acceptable for your threat model, the alternative is a backend-for-frontend: keep tokens in `httpOnly`, `SameSite=Strict` cookies and have the Next server attach them — which costs a client secret and server-side session state.
 
+## Guardrails
+
+The client is untrusted even when authenticated — a signed-in user can still post a hand-rolled body — so every limit is enforced server-side, before a request reaches the model.
+
+### Spend and abuse
+
+| Guardrail | Limit | Why |
+|---|---|---|
+| Burst rate | 15 requests/min per caller | One user cannot flood the endpoint. |
+| Sustained rate | 150 requests/hour per caller | Caps the damage from a stolen token or a runaway client loop. |
+| Request body | 1 MB | Beyond ~10x that, the body is refused without buffering at all. |
+| Messages per conversation | 200 | Each request resends the whole history, so length is a cost multiplier. |
+| Characters per user message | 32,000 | ~8k tokens; generous for a paste, bounded for a bill. |
+| Characters per conversation | 600,000 | ~150k tokens, where compaction would start anyway. |
+| Search uses per turn | 5 | Caps worst-case latency and search spend. |
+| Upstream timeout | 55s, 1 retry | A stalled call cannot hold the function open until the platform kills it. |
+
+Requests are keyed on the authenticated `sub` where there is one, and the client IP otherwise. **IP keying is a speed bump, not a control** — the header is forgeable unless a trusted proxy overwrites it — which is another reason to run with authentication enabled.
+
+Two details that are easy to get wrong, both pinned by tests. A rejected request **does not consume quota**, otherwise a client that keeps retrying locks itself out indefinitely. And an oversized body is **read to completion before being rejected**: returning early without draining leaves the keep-alive socket half-read, so the client's *next* request dies with `ECONNRESET`. Only absurd payloads (>10 MB) are abandoned mid-flight, where a broken connection is the lesser cost.
+
+**Known limitation:** the rate-limit store is in-memory, so it is per-instance. On one server that is exact; across several serverless instances each enforces the limit separately, making the real ceiling the limit times the instance count. That is a genuine weakening, accepted to keep the deploy dependency-free. Swapping `MemoryStore` for Redis makes it global and is the one change needed.
+
+### Prompt injection
+
+This agent reads attacker-controlled text by design: a web page can say anything, including text addressed to the model. The system prompt therefore draws an explicit line between *data* and *instructions* — search results are only ever content to read and report on. It names the specific moves (text claiming to be from the user or developer, instructions to ignore prior rules, adopt a persona, or reveal the prompt), forbids using page content as grounds to disclose the conversation or configuration, and asks the model to say so plainly when a page tries it.
+
+This is mitigation, not a proof. The structural defences matter more: the agent has exactly **one** tool and it is read-only, so there is no destructive action for an injection to reach. Any future tool with side effects would need its own authorisation check rather than relying on the prompt.
+
+### Browser-side
+
+Security headers are set for every route in `next.config.ts`: `frame-ancestors 'none'` plus `X-Frame-Options: DENY` (clickjacking), `base-uri 'self'` (base-tag injection), `object-src 'none'`, `nosniff`, a referrer policy, a permissions policy denying camera/mic/geolocation/payment, and HSTS. `connect-src` is same-origin plus the configured OIDC issuer, so sign-in still works.
+
+`script-src` needs `'unsafe-inline'` because Next's hydration bootstrap is inline; tightening it to a nonce requires middleware that rewrites the header per request. Worth doing if this grows, and called out here rather than glossed over. Note that these headers are baked at build time, so the issuer must be set in the build environment — which it must be anyway, since `NEXT_PUBLIC_*` values are inlined into the bundle.
+
 ## What is intentionally left out
 
 - **No RAG or vector memory** — transcript plus inline timestamps already answers "what did I ask, and when"; at this scale 1M context makes retrieval pure overhead.

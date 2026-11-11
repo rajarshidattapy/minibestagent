@@ -20,11 +20,24 @@ Get a key at [console.anthropic.com](https://console.anthropic.com/settings/keys
 
 Leaving the `OIDC_*` variables unset runs without auth. That is fine locally, but **in production it fails closed with a 500** until you either configure an issuer or set `AUTH_OPTIONAL=true`, so a forgotten variable can never quietly leave the endpoint open.
 
+## Guardrails
+
+Enforced server-side on every request, because an authenticated client is still an untrusted one:
+
+- **Rate limits** — 15 requests/min and 150/hour per caller, keyed on the authenticated subject (or IP when running without auth). Replies carry `Retry-After`.
+- **Size limits** — 1 MB body, 200 messages per conversation, 32k characters per message, 600k per conversation.
+- **Prompt injection** — search results are treated strictly as data. The model is told never to follow instructions found on a web page, and to say so when one tries. The agent's single tool is read-only, so there is no destructive action to reach.
+- **Timeouts** — 55s upstream cap, 5 searches per turn.
+- **Security headers** — CSP, `frame-ancestors 'none'`, `nosniff`, referrer and permissions policies, HSTS.
+
+Tune the numbers in [`lib/guardrails.ts`](./lib/guardrails.ts) and [`lib/rate-limit.ts`](./lib/rate-limit.ts). The rate-limit store is in-memory and therefore per-instance — see `design.md` for what that means on serverless and how to make it global.
+
 ## Checks
 
 ```bash
-npm run test         # parsing, stream framing, and token verification
-npm run verify:oidc  # drives the auth gate against a throwaway local OIDC issuer
+npm run test               # parsing, stream framing, token verification, guardrails
+npm run verify:oidc        # auth gate against a throwaway local OIDC issuer
+npm run verify:guardrails  # limits and security headers over HTTP
 npm run typecheck
 npm run build
 ```
@@ -40,6 +53,9 @@ npm run build
 | `lib/types.ts`          | Shared shapes, deliberately free of SDK imports so the client bundle stays small. |
 | `lib/auth.ts`           | Token verification: signature, issuer, audience, expiry.                          |
 | `lib/oauth.ts`          | Browser sign-in: Authorization Code + PKCE, token refresh.                        |
+| `lib/guardrails.ts`     | Input size and shape limits.                                                      |
+| `lib/rate-limit.ts`     | Per-caller burst and sustained rate limiting.                                     |
+| `next.config.ts`        | Security headers and CSP.                                                         |
 
 
 ## Notes
