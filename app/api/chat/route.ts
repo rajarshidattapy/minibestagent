@@ -3,6 +3,7 @@ import { authorizeRequest, challengeHeader } from "@/lib/auth";
 import { MAX_MESSAGE_CHARS, readBoundedJson } from "@/lib/guardrails";
 import { checkRateLimit, rateLimitHeaders, rateLimitKey } from "@/lib/rate-limit";
 import { ownerFor, setOwnerCookie } from "@/lib/owner";
+import { requirePermission } from "@/lib/rbac";
 import { cacheKey, lookup as cacheLookup, store as cacheStore } from "@/lib/cache";
 import { buildContext } from "@/lib/memory/context";
 import { appendTurn, ownsConversation } from "@/lib/memory/store";
@@ -91,6 +92,14 @@ export async function POST(request: Request) {
           auth.status === 401 ? { "WWW-Authenticate": challengeHeader(auth) } : undefined,
       },
     );
+  }
+
+  // Authentication answered "who is this"; this is the separate question of
+  // "are they allowed to send a message" - a "readonly" role, for instance,
+  // can authenticate perfectly well and still be denied here.
+  const forbidden = requirePermission(auth.claims, "chat:send");
+  if (forbidden) {
+    return Response.json({ error: forbidden.error }, { status: forbidden.status });
   }
 
   const subject = typeof auth.claims?.sub === "string" ? auth.claims.sub : null;

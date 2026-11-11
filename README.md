@@ -42,6 +42,14 @@ The rules allow one tool, so memory is not one: retrieval runs server-side befor
 
 Signed in, memory follows you across devices. Signed out, it is scoped to the browser by an `httpOnly` cookie. The database lives at `./data/mini.db` (override with `MEMORY_DB_PATH`).
 
+## Role-based permission control
+
+Authentication (`lib/auth.ts`) answers "who is this"; permission control (`lib/rbac.ts`) answers "what are they allowed to do" - checked separately, on every route.
+
+Roles come from the verified token's own claims, so there is no second place for them to drift out of sync. Three roles ship: **user** (send and read, the default for any signed-in principal whose token carries no role the app recognises - most OIDC setups never configure custom roles, so this is the floor, not a trap), **readonly** (read only - a role that *removes* access, not just one that adds it), and **admin** (read any user's conversation via `?as=<owner key>` on `/api/conversation`, and `GET /api/admin/stats` for cache visibility). The claim is read from whichever shape the IdP used: a plain `roles` array, a space-delimited OAuth2 `scope`, Keycloak's `realm_access.roles`, Cognito's `cognito:groups`, or a custom claim named by `OIDC_ROLES_CLAIM`.
+
+Every admin read of another user's conversation is written to the server log with the admin's subject and the target, since impersonating a read is exactly the kind of action an audit trail exists for.
+
 ## Response cache
 
 Repeat questions are answered from a cache stored alongside memory in SQLite, so it survives restarts. The key is a hash of the whole prompt with the clock scrubbed to day precision — same question later the same day hits; the next day it does not, because date-relative questions ("what did I ask yesterday?") would otherwise get the wrong answer. Only the hash is stored, never the prompt.
@@ -57,7 +65,7 @@ npm run typecheck
 npm run build
 ```
 
-`npm run verify` runs four end-to-end suites against a real server on a throwaway database: `verify:memory` (date and topic recall, per-owner isolation, reload), `verify:cache` (counts calls reaching a stand-in model endpoint, and restarts the server to prove the cache is on disk), `verify:oidc` (token verification against a local OIDC issuer), and `verify:guardrails` (limits and security headers).
+`npm run verify` runs five end-to-end suites against a real server on a throwaway database: `verify:memory` (date and topic recall, per-owner isolation, reload), `verify:cache` (counts calls reaching a stand-in model endpoint, and restarts the server to prove the cache is on disk), `verify:rbac` (mints tokens with different roles and checks both denial and elevation over real HTTP), `verify:oidc` (token verification against a local OIDC issuer), and `verify:guardrails` (limits and security headers).
 
 ## Layout
 
@@ -72,6 +80,7 @@ npm run build
 | `lib/memory/context.ts` | Assembles each request: live thread + date recall + topic recall.                 |
 | `lib/cache.ts`          | Response cache: scrubbed prompt hash, TTL by whether it searched.                 |
 | `lib/db.ts`             | The shared SQLite connection and schema.                                          |
+| `lib/rbac.ts`           | Roles and permissions, read from the token's own claims.                          |
 | `lib/types.ts`          | Shared shapes, deliberately free of SDK imports so the client bundle stays small. |
 | `lib/auth.ts`           | Token verification: signature, issuer, audience, expiry.                          |
 | `lib/oauth.ts`          | Browser sign-in: Authorization Code + PKCE, token refresh.                        |

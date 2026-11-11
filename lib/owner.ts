@@ -39,6 +39,18 @@ export function ownerFor(request: Request, subject: string | null): Owner {
   return { owner: `anon:${randomUUID()}`, isNew: true };
 }
 
+/**
+ * Does this look like an owner key this app could have issued?
+ *
+ * Used to validate an admin-supplied `?as=` target before it ever reaches a
+ * database query: the subject half can be almost anything an IdP issues
+ * (`auth0|507f191e810c19729de860ea`, an email, a UUID), so this only rules
+ * out control characters and whitespace rather than guessing a strict shape.
+ */
+export function isValidOwnerKey(value: string): boolean {
+  return /^(sub|anon):[\x21-\x7e]{1,190}$/.test(value);
+}
+
 export function setOwnerCookie(response: Response, owner: string): void {
   const id = owner.replace(/^anon:/, "");
   response.headers.append(

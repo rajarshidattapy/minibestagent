@@ -12,8 +12,9 @@
     "verify:guardrails": "node scripts/verify-guardrails.mjs",
     "lint": "next lint",
     "verify:memory": "node scripts/verify-memory.mjs",
-    "verify": "npm run verify:memory && npm run verify:cache && npm run verify:oidc && npm run verify:guardrails",
-    "verify:cache": "node scripts/verify-cache.mjs"
+    "verify": "npm run verify:memory && npm run verify:cache && npm run verify:rbac && npm run verify:oidc && npm run verify:guardrails",
+    "verify:cache": "node scripts/verify-cache.mjs",
+    "verify:rbac": "node scripts/verify-rbac.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^1.8.0",
