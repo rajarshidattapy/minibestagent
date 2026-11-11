@@ -10,6 +10,23 @@ export function localStamp(iso: string): string {
   );
 }
 
+/** "Today", "Yesterday", or "3 November 2026" - the transcript's date separator. */
+export function dayLabel(iso: string): string {
+  const date = new Date(iso);
+  const today = new Date();
+  const yesterday = new Date(today.getTime() - 86_400_000);
+
+  if (date.toDateString() === today.toDateString()) return "Today";
+  if (date.toDateString() === yesterday.toDateString()) return "Yesterday";
+
+  return date.toLocaleDateString("en-GB", {
+    day: "numeric",
+    month: "long",
+    // Only show the year when it is not the current one.
+    year: date.getFullYear() === today.getFullYear() ? undefined : "numeric",
+  });
+}
+
 /** "2:32 PM" - the clock shown next to a bubble. */
 export function clockLabel(iso: string): string {
   return new Date(iso).toLocaleTimeString([], {

@@ -10,7 +10,9 @@
     "test": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test \"lib/**/*.test.ts\"",
     "verify:oidc": "node scripts/verify-oidc.mjs",
     "verify:guardrails": "node scripts/verify-guardrails.mjs",
-    "lint": "next lint"
+    "lint": "next lint",
+    "verify:memory": "node scripts/verify-memory.mjs",
+    "verify": "npm run verify:memory && npm run verify:oidc && npm run verify:guardrails"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^1.8.0",

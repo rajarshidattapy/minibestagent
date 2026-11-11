@@ -9,3 +9,9 @@ next-env.d.ts
 *.tsbuildinfo
 .vercel
 .DS_Store
+
+# Local memory database
+data/
+
+# The brief itself - kept locally, not part of the submission
+challenge.md

@@ -101,7 +101,7 @@ async function endpoints(config: OAuthConfig): Promise<Endpoints> {
 /**
  * sessionStorage, not localStorage: the token dies with the tab, which keeps
  * the exposure window short. It is still script-readable, so an XSS bug would
- * expose it - see design.md for why that tradeoff is acceptable here and what
+ * expose it - see DESIGN.md for why that tradeoff is acceptable here and what
  * to do instead if it is not.
  */
 function loadTokens(): TokenSet | null {

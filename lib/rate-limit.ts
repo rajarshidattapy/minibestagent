@@ -11,7 +11,7 @@
  * the limit separately, so the effective ceiling is the limit times the
  * instance count. That is a real weakening, and it is the price of keeping
  * the deploy dependency-free - swap `MemoryStore` for Redis to make it
- * global. See design.md.
+ * global. See DESIGN.md.
  */
 
 export type Rule = { name: string; limit: number; windowMs: number };

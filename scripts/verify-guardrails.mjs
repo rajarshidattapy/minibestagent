@@ -3,6 +3,9 @@
  * Usage: node scripts/verify-guardrails.mjs
  */
 import { spawn } from "node:child_process";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const PORT = 3133;
@@ -22,6 +25,8 @@ const app = spawn(process.execPath, [nextBin, "start", "-p", String(PORT)], {
   env: {
     ...process.env,
     NODE_ENV: "production",
+    // A throwaway store, so runs never inherit another run's conversations.
+    MEMORY_DB_PATH: join(mkdtempSync(join(tmpdir(), "mini-guard-")), "verify.db"),
     AUTH_OPTIONAL: "true",
     ANTHROPIC_API_KEY: "sk-ant-dummy-for-guardrail-test",
   },
@@ -60,25 +65,29 @@ try {
   check("framework version is not advertised", page.headers.get("x-powered-by") === null);
 
   // --- input limits -------------------------------------------------------
-  const oversized = await post({ messages: [{ role: "user", content: "x".repeat(40_000) }] });
+  const oversized = await post({ conversationId: "probe", message: "x".repeat(40_000) });
   check("an oversized message is refused", oversized.status === 413, `status ${oversized.status}: ${(await oversized.text()).slice(0, 90)}`);
 
-  const bigBody = await post(JSON.stringify({ messages: [{ role: "user", content: "x".repeat(1_200_000) }] }));
+  const bigBody = await post(
+    JSON.stringify({ conversationId: "probe", message: "x".repeat(1_200_000) }),
+  );
   check("an oversized body is refused", bigBody.status === 413, `status ${bigBody.status}`);
 
-  const trailingAssistant = await post({
-    messages: [{ role: "user", content: "hi" }, { role: "assistant", content: [{ type: "text", text: "hello" }] }],
-  });
-  check("a history not ending with the user is refused", trailingAssistant.status === 400, `status ${trailingAssistant.status}`);
+  const empty = await post({ conversationId: "probe", message: "   " });
+  check("an empty message is refused", empty.status === 400, `status ${empty.status}`);
 
-  const empty = await post({ messages: [] });
-  check("an empty conversation is refused", empty.status === 400, `status ${empty.status}`);
+  const badId = await post({ conversationId: "../../etc/passwd", message: "hi" });
+  check("a malformed conversation id is refused", badId.status === 400, `status ${badId.status}`);
+
+  // Someone else's conversation id must not be readable.
+  const foreign = await fetch(`${BASE}/api/conversation?id=not%20an%20id`);
+  check("a malformed id is refused on read too", foreign.status === 400, `status ${foreign.status}`);
 
   // --- rate limiting ------------------------------------------------------
   // Burst limit is 15/min; the 16th from the same caller must be refused.
   let limited = null;
   for (let i = 0; i < 18; i++) {
-    const response = await post({ messages: [{ role: "user", content: `ping ${i}` }] });
+    const response = await post({ conversationId: "probe", message: `ping ${i}` });
     // Drain so the connection is not left open.
     await response.text();
     if (response.status === 429) {

@@ -223,6 +223,39 @@ body {
   }
 }
 
+.status.recall {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.day-separator {
+  text-align: center;
+  font-size: 11.5px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin: 4px 0;
+  position: relative;
+}
+
+.day-separator::before,
+.day-separator::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  width: calc(50% - 60px);
+  height: 1px;
+  background: var(--line);
+}
+
+.day-separator::before {
+  left: 0;
+}
+
+.day-separator::after {
+  right: 0;
+}
+
 .sources {
   display: flex;
   flex-wrap: wrap;

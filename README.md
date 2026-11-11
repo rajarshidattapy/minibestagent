@@ -1,14 +1,16 @@
 # mini
 
-A fast chat agent with one tool — web search — that remembers what you asked and when.
+A fast chat agent with one tool — web search — that remembers what you asked and when, across days and devices.
 
-See [`design.md`](./design.md) for why it is built this way.
+Ask it "what did I ask you on 3 November, and is that still true?" and it will find the conversation, re-search, and tell you what changed.
+
+See [`DESIGN.md`](./DESIGN.md) for why it is built this way.
 
 ## Run it
 
 ```bash
 npm install
-cp .env.local.example .env.local   # then put your key in it
+cp .env.example .env            # then put your key in it
 npm run dev                        # http://localhost:3000
 ```
 
@@ -16,7 +18,7 @@ Get a key at [console.anthropic.com](https://console.anthropic.com/settings/keys
 
 ## Authentication
 
-`/api/chat` can require a signed OAuth 2.0 / OIDC access token. Set `OIDC_ISSUER` and `OIDC_AUDIENCE` and every request is checked for **signature, issuer, audience and expiry** before it costs you a token. Add `NEXT_PUBLIC_OIDC_ISSUER` and `NEXT_PUBLIC_OIDC_CLIENT_ID` and the UI gains sign-in via Authorization Code + PKCE. Works with any OIDC provider — Auth0, Clerk, Cognito, Okta, Entra, Keycloak. See [`.env.local.example`](./.env.local.example).
+`/api/chat` can require a signed OAuth 2.0 / OIDC access token. Set `OIDC_ISSUER` and `OIDC_AUDIENCE` and every request is checked for **signature, issuer, audience and expiry** before it costs you a token. Add `NEXT_PUBLIC_OIDC_ISSUER` and `NEXT_PUBLIC_OIDC_CLIENT_ID` and the UI gains sign-in via Authorization Code + PKCE. Works with any OIDC provider — Auth0, Clerk, Cognito, Okta, Entra, Keycloak. See [`.env.example`](./.env.example).
 
 Leaving the `OIDC_*` variables unset runs without auth. That is fine locally, but **in production it fails closed with a 500** until you either configure an issuer or set `AUTH_OPTIONAL=true`, so a forgotten variable can never quietly leave the endpoint open.
 
@@ -30,17 +32,26 @@ Enforced server-side on every request, because an authenticated client is still 
 - **Timeouts** — 55s upstream cap, 5 searches per turn.
 - **Security headers** — CSP, `frame-ancestors 'none'`, `nosniff`, referrer and permissions policies, HSTS.
 
-Tune the numbers in [`lib/guardrails.ts`](./lib/guardrails.ts) and [`lib/rate-limit.ts`](./lib/rate-limit.ts). The rate-limit store is in-memory and therefore per-instance — see `design.md` for what that means on serverless and how to make it global.
+Tune the numbers in [`lib/guardrails.ts`](./lib/guardrails.ts) and [`lib/rate-limit.ts`](./lib/rate-limit.ts). The rate-limit store is in-memory and therefore per-instance — see `DESIGN.md` for what that means on serverless and how to make it global.
+
+## Memory
+
+Turns are stored server-side in SQLite (`node:sqlite`, built into Node — no extra dependency, no setup). On each turn the server assembles context from the live thread, anything from a date you named ("on 3 November", "last Tuesday", "yesterday"), and anything that matches by topic via full-text search.
+
+The rules allow one tool, so memory is not one: retrieval runs server-side before the model is called, which is also why it costs no extra round-trip. Only your new message crosses the wire, so cost per turn does not grow with the length of the conversation.
+
+Signed in, memory follows you across devices. Signed out, it is scoped to the browser by an `httpOnly` cookie. The database lives at `./data/mini.db` (override with `MEMORY_DB_PATH`).
 
 ## Checks
 
 ```bash
-npm run test               # parsing, stream framing, token verification, guardrails
-npm run verify:oidc        # auth gate against a throwaway local OIDC issuer
-npm run verify:guardrails  # limits and security headers over HTTP
+npm run test       # 54 unit tests: dates, recall, parsing, token verification, guardrails
+npm run verify     # all three HTTP suites below
 npm run typecheck
 npm run build
 ```
+
+`npm run verify` runs three end-to-end suites against a real server on a throwaway database: `verify:memory` (date and topic recall, per-owner isolation, reload), `verify:oidc` (token verification against a local OIDC issuer), and `verify:guardrails` (limits and security headers).
 
 ## Layout
 
@@ -50,6 +61,9 @@ npm run build
 | `app/page.tsx`          | The chat UI. Owns the transcript and persists it to `localStorage`.               |
 | `app/api/chat/route.ts` | Stateless streaming endpoint. One Claude call per turn, web search attached.      |
 | `lib/chat.ts`           | Stream framing, citation extraction, timestamp formatting.                        |
+| `lib/memory/dates.ts`   | Turns "3 November" / "last Tuesday" into day ranges.                              |
+| `lib/memory/store.ts`   | Durable turns in SQLite, with full-text search.                                   |
+| `lib/memory/context.ts` | Assembles each request: live thread + date recall + topic recall.                 |
 | `lib/types.ts`          | Shared shapes, deliberately free of SDK imports so the client bundle stays small. |
 | `lib/auth.ts`           | Token verification: signature, issuer, audience, expiry.                          |
 | `lib/oauth.ts`          | Browser sign-in: Authorization Code + PKCE, token refresh.                        |

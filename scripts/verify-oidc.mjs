@@ -10,6 +10,9 @@
  */
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
 
@@ -58,7 +61,7 @@ const mint = (claims = {}) => {
     .setProtectedHeader({ alg: "RS256", kid: claims.kid ?? "local-1" })
     .setIssuer(claims.iss ?? ISSUER)
     .setAudience(claims.aud ?? AUDIENCE)
-    .setSubject("user-42")
+    .setSubject(claims.sub ?? "user-42")
     .setIssuedAt(now)
     .setExpirationTime(claims.exp ?? now + 300)
     .sign(privateKey);
@@ -75,6 +78,8 @@ const app = spawn(
     env: {
       ...process.env,
       NODE_ENV: "production",
+      // A throwaway store, so runs never inherit another run's conversations.
+      MEMORY_DB_PATH: join(mkdtempSync(join(tmpdir(), "mini-oidc-")), "verify.db"),
       OIDC_ISSUER: ISSUER,
       OIDC_AUDIENCE: AUDIENCE,
       ANTHROPIC_API_KEY: "sk-ant-dummy-for-auth-test",
@@ -95,14 +100,14 @@ async function waitForApp() {
   throw new Error("app did not start");
 }
 
-async function probe(label, token, expectedStatus) {
+async function probe(label, token, expectedStatus, conversationId = "probe") {
   const response = await fetch(`http://localhost:${APP_PORT}/api/chat`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
     },
-    body: JSON.stringify({ messages: [{ role: "user", content: "hi" }] }),
+    body: JSON.stringify({ conversationId, message: "hi" }),
   });
 
   const body = await response.text();
@@ -127,6 +132,16 @@ try {
   await probe("wrong issuer is rejected", await mint({ iss: "https://evil.example.com" }), 401);
   await probe("wrong audience is rejected", await mint({ aud: "https://other.example" }), 401);
   await probe("unknown signing key is rejected", await mint({ kid: "does-not-exist" }), 401);
+
+  // One user's conversation must not be reachable by another, even with a
+  // perfectly valid token - the id alone is not authorisation.
+  await probe("user A opens a conversation", await mint({ sub: "user-a" }), 200, "shared-id");
+  await probe(
+    "user B cannot reach user A's conversation",
+    await mint({ sub: "user-b" }),
+    404,
+    "shared-id",
+  );
 } finally {
   app.kill();
   issuer.close();

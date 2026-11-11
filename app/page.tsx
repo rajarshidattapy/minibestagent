@@ -5,8 +5,8 @@ import type { Source, StoredMessage } from "@/lib/types";
 import {
   blocksToText,
   clockLabel,
+  dayLabel,
   extractSources,
-  localStamp,
   readEvents,
   searchErrors,
 } from "@/lib/chat";
@@ -19,29 +19,31 @@ import {
   logout,
 } from "@/lib/oauth";
 
-const STORAGE_KEY = "mini.history.v1";
+/** Only the conversation id lives in the browser now; the turns live on the server. */
+const CONVERSATION_KEY = "mini.conversation.v2";
 
 const EXAMPLES = [
   "What shipped in the last Next.js release?",
-  "Who won the F1 race this weekend?",
-  "What did I ask you earlier today?",
+  "What did I ask you yesterday?",
+  "Is what you told me last week still true?",
 ];
 
 type Pending = {
   text: string;
   searching: boolean;
   query?: string;
+  recall?: { count: number; since: string };
 };
 
 export default function Page() {
   const [history, setHistory] = useState<StoredMessage[]>([]);
+  const [conversationId, setConversationId] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [input, setInput] = useState("");
   const [pending, setPending] = useState<Pending | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [user, setUser] = useState<string | null>(null);
 
-  // Only meaningful once mounted: sign-in state lives in sessionStorage.
   const requiresAuth = authEnabled();
   const signedIn = !requiresAuth || user !== null;
 
@@ -49,26 +51,34 @@ export default function Page() {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const abortRef = useRef<AbortController | null>(null);
 
-  // The transcript is the memory: load it before the first paint we control.
+  // Restore the thread from the server, so a reload (or another device, when
+  // signed in) shows the same conversation.
   useEffect(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_KEY);
-      if (saved) setHistory(JSON.parse(saved) as StoredMessage[]);
-    } catch {
-      // Corrupt or unavailable storage - start clean rather than crash.
+    let id = localStorage.getItem(CONVERSATION_KEY);
+    if (!id) {
+      id = crypto.randomUUID();
+      localStorage.setItem(CONVERSATION_KEY, id);
     }
+    setConversationId(id);
     if (isSignedIn()) setUser(currentUser());
-    setLoaded(true);
-  }, []);
 
-  useEffect(() => {
-    if (!loaded) return;
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(history));
-    } catch {
-      // Over quota: the conversation still works for this session.
-    }
-  }, [history, loaded]);
+    (async () => {
+      try {
+        const token = authEnabled() ? await getAccessToken() : null;
+        const response = await fetch(`/api/conversation?id=${encodeURIComponent(id)}`, {
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+        });
+        if (response.ok) {
+          const data = (await response.json()) as { turns: StoredMessage[] };
+          setHistory(data.turns);
+        }
+      } catch {
+        // Offline or server down: start empty rather than block the UI.
+      } finally {
+        setLoaded(true);
+      }
+    })();
+  }, []);
 
   useEffect(() => {
     threadRef.current?.scrollTo({ top: threadRef.current.scrollHeight });
@@ -77,10 +87,8 @@ export default function Page() {
   const send = useCallback(
     async (raw: string) => {
       const text = raw.trim();
-      if (!text || pending) return;
+      if (!text || pending || !conversationId) return;
 
-      // Refreshes the token if it is close to expiry, so a long-idle tab does
-      // not send a request that is guaranteed to come back 401.
       const token = requiresAuth ? await getAccessToken() : null;
       if (requiresAuth && !token) {
         setUser(null);
@@ -92,19 +100,17 @@ export default function Page() {
       setInput("");
       if (textareaRef.current) textareaRef.current.style.height = "auto";
 
-      const ts = new Date().toISOString();
-      const userTurn: StoredMessage = {
-        id: crypto.randomUUID(),
-        role: "user",
-        ts,
-        text,
-        // The model sees the clock inline, which is how it can answer
-        // "what did I ask you an hour ago?".
-        content: `[${localStamp(ts)}] ${text}`,
-      };
-
-      const next = [...history, userTurn];
-      setHistory(next);
+      // Shown immediately; the server is the record of what was actually stored.
+      setHistory((h) => [
+        ...h,
+        {
+          id: `local-${crypto.randomUUID()}`,
+          role: "user",
+          ts: new Date().toISOString(),
+          text,
+          content: text,
+        },
+      ]);
       setPending({ text: "", searching: false });
 
       const controller = new AbortController();
@@ -118,9 +124,9 @@ export default function Page() {
             ...(token ? { Authorization: `Bearer ${token}` } : {}),
           },
           signal: controller.signal,
-          body: JSON.stringify({
-            messages: next.map(({ role, content }) => ({ role, content })),
-          }),
+          // Only the new message travels. The server already has the history,
+          // so cost per turn no longer grows with the length of the thread.
+          body: JSON.stringify({ conversationId, message: text }),
         });
 
         if (!response.ok || !response.body) {
@@ -128,8 +134,6 @@ export default function Page() {
             .json()
             .then((d: { error?: string }) => d.error)
             .catch(() => null);
-          // The server rejected the token - drop back to the sign-in prompt
-          // rather than leaving the user typing into a dead session.
           if (response.status === 401) setUser(null);
           throw new Error(detail ?? `Request failed (${response.status}).`);
         }
@@ -143,16 +147,17 @@ export default function Page() {
             setPending((p) =>
               p ? { ...p, searching: true, query: event.query ?? p.query } : p,
             );
+          } else if (event.type === "recall") {
+            setPending((p) =>
+              p ? { ...p, recall: { count: event.count, since: event.since } } : p,
+            );
           } else if (event.type === "error") {
             throw new Error(event.message);
           } else if (event.type === "done") {
-            // Store the content blocks verbatim. History is append-only, and
-            // replaying the exact blocks is what keeps the model's own state
-            // (thinking, search results) intact across turns.
             setHistory((h) => [
               ...h,
               {
-                id: crypto.randomUUID(),
+                id: `local-${crypto.randomUUID()}`,
                 role: "assistant",
                 ts: new Date().toISOString(),
                 content: event.content,
@@ -170,14 +175,17 @@ export default function Page() {
         setPending(null);
       }
     },
-    [history, pending, requiresAuth],
+    [conversationId, pending, requiresAuth],
   );
 
-  const clear = () => {
+  /** Starts a fresh thread. Earlier conversations stay in memory and remain recallable. */
+  const newConversation = () => {
     abortRef.current?.abort();
+    const id = crypto.randomUUID();
+    localStorage.setItem(CONVERSATION_KEY, id);
+    setConversationId(id);
     setHistory([]);
     setError(null);
-    localStorage.removeItem(STORAGE_KEY);
   };
 
   return (
@@ -208,10 +216,11 @@ export default function Page() {
           )}
           <button
             className="ghost-button"
-            onClick={clear}
+            onClick={newConversation}
             disabled={!history.length}
+            title="Earlier conversations stay in memory and can still be recalled"
           >
-            Clear
+            New chat
           </button>
         </div>
       </header>
@@ -231,14 +240,13 @@ export default function Page() {
         {loaded && signedIn && !history.length && !pending && (
           <div className="empty">
             <p>Ask anything.</p>
-            <p>It searches the web when the answer needs to be current.</p>
+            <p>
+              It searches the web when the answer needs to be current, and remembers
+              what you asked and when.
+            </p>
             <div className="examples">
               {EXAMPLES.map((example) => (
-                <button
-                  key={example}
-                  className="chip"
-                  onClick={() => send(example)}
-                >
+                <button key={example} className="chip" onClick={() => send(example)}>
                   {example}
                 </button>
               ))}
@@ -246,16 +254,29 @@ export default function Page() {
           </div>
         )}
 
-        {signedIn && history.map((turn) => <Turn key={turn.id} turn={turn} />)}
+        {signedIn &&
+          history.map((turn, index) => (
+            <Turn
+              key={turn.id}
+              turn={turn}
+              // A date separator, so "you asked that on Monday" is visible.
+              showDay={index === 0 || !sameDay(history[index - 1].ts, turn.ts)}
+            />
+          ))}
 
         {pending && (
           <div className="turn assistant">
+            {pending.recall && (
+              <div className="status recall">
+                Recalling {pending.recall.count} earlier message
+                {pending.recall.count === 1 ? "" : "s"} from{" "}
+                {dayLabel(pending.recall.since)}
+              </div>
+            )}
             {pending.searching && (
               <div className="status">
                 <span className="dot" />
-                {pending.query
-                  ? `Searching for "${pending.query}"`
-                  : "Searching the web"}
+                {pending.query ? `Searching for "${pending.query}"` : "Searching the web"}
               </div>
             )}
             {pending.text ? (
@@ -300,19 +321,11 @@ export default function Page() {
           }}
         />
         {pending ? (
-          <button
-            type="button"
-            className="send"
-            onClick={() => abortRef.current?.abort()}
-          >
+          <button type="button" className="send" onClick={() => abortRef.current?.abort()}>
             Stop
           </button>
         ) : (
-          <button
-            type="submit"
-            className="send"
-            disabled={!input.trim() || !signedIn}
-          >
+          <button type="submit" className="send" disabled={!input.trim() || !signedIn}>
             Send
           </button>
         )}
@@ -322,24 +335,31 @@ export default function Page() {
   );
 }
 
-function Turn({ turn }: { turn: StoredMessage }) {
+function sameDay(a: string, b: string): boolean {
+  return new Date(a).toDateString() === new Date(b).toDateString();
+}
+
+function Turn({ turn, showDay }: { turn: StoredMessage; showDay: boolean }) {
   const isUser = turn.role === "user";
   const body = isUser ? (turn.text ?? "") : blocksToText(turn.content);
   const sources = isUser ? [] : extractSources(turn.content);
   const failures = isUser ? [] : searchErrors(turn.content);
 
   return (
-    <div className={`turn ${isUser ? "user" : "assistant"}`}>
-      <div className="meta">
-        {isUser ? "You" : "mini"} · {clockLabel(turn.ts)}
+    <>
+      {showDay && <div className="day-separator">{dayLabel(turn.ts)}</div>}
+      <div className={`turn ${isUser ? "user" : "assistant"}`}>
+        <div className="meta">
+          {isUser ? "You" : "mini"} · {clockLabel(turn.ts)}
+        </div>
+        {sources.length > 0 && <SourceList sources={sources} />}
+        {body && <div className="bubble">{body}</div>}
+        {!isUser && turn.text && <div className="notice">{turn.text}</div>}
+        {failures.length > 0 && (
+          <div className="notice">Search failed: {failures.join(", ")}.</div>
+        )}
       </div>
-      {sources.length > 0 && <SourceList sources={sources} />}
-      {body && <div className="bubble">{body}</div>}
-      {!isUser && turn.text && <div className="notice">{turn.text}</div>}
-      {failures.length > 0 && (
-        <div className="notice">Search failed: {failures.join(", ")}.</div>
-      )}
-    </div>
+    </>
   );
 }
 

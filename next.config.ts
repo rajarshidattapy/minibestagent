@@ -24,7 +24,7 @@ function connectSources(): string {
 const csp = [
   "default-src 'self'",
   // Next's hydration bootstrap is inline. Tightening this to a nonce needs
-  // middleware that rewrites the header per request; see design.md.
+  // middleware that rewrites the header per request; see DESIGN.md.
   "script-src 'self' 'unsafe-inline'",
   "style-src 'self' 'unsafe-inline'",
   // Search results are summarised as text, never rendered, so no remote

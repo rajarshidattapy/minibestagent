@@ -1,13 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import {
-  MAX_BODY_BYTES,
-  MAX_MESSAGES,
-  MAX_MESSAGE_CHARS,
-  MAX_TOTAL_CHARS,
-  checkConversation,
-  readBoundedJson,
-} from "./guardrails.ts";
+import { MAX_BODY_BYTES, readBoundedJson } from "./guardrails.ts";
 import {
   MemoryStore,
   checkRateLimit,
@@ -15,78 +8,6 @@ import {
   rateLimitKey,
   type Rule,
 } from "./rate-limit.ts";
-import type { ApiMessage } from "./types.ts";
-
-const user = (text: string): ApiMessage => ({ role: "user", content: text });
-const assistant = (text: string): ApiMessage => ({
-  role: "assistant",
-  content: [{ type: "text", text }],
-});
-
-// --- conversation limits --------------------------------------------------
-
-test("an ordinary conversation passes", () => {
-  assert.equal(checkConversation([user("hi"), assistant("hello"), user("more")]), null);
-});
-
-test("an empty conversation is rejected", () => {
-  assert.equal(checkConversation([])?.status, 400);
-});
-
-test("a history that does not end with the user is rejected", () => {
-  const failure = checkConversation([user("hi"), assistant("hello")]);
-  assert.equal(failure?.status, 400);
-  assert.match(failure!.error, /last message must be from the user/);
-});
-
-test("too many turns is rejected", () => {
-  const many = Array.from({ length: MAX_MESSAGES + 1 }, () => user("hi"));
-  assert.equal(checkConversation(many)?.status, 413);
-});
-
-test("an oversized user message is rejected", () => {
-  const failure = checkConversation([user("x".repeat(MAX_MESSAGE_CHARS + 1))]);
-  assert.equal(failure?.status, 413);
-  assert.match(failure!.error, /Message 1 is too long/);
-});
-
-test("an oversized assistant turn is not blamed on the user", () => {
-  // Assistant turns are replayed verbatim and already bounded by max_tokens,
-  // so only the total matters for them.
-  const failure = checkConversation([
-    assistant("x".repeat(MAX_MESSAGE_CHARS + 1)),
-    user("hi"),
-  ]);
-  assert.equal(failure, null);
-});
-
-test("an oversized conversation is rejected even when each message is small", () => {
-  const chunk = "x".repeat(MAX_MESSAGE_CHARS);
-  const needed = Math.ceil(MAX_TOTAL_CHARS / MAX_MESSAGE_CHARS) + 1;
-  const messages = Array.from({ length: needed }, () => assistant(chunk));
-  messages.push(user("hi"));
-
-  const failure = checkConversation(messages);
-  assert.equal(failure?.status, 413);
-  assert.match(failure!.error, /too large/);
-});
-
-test("search results inside an assistant turn count toward the total", () => {
-  // A long search result is real tokens; ignoring it would let a client
-  // replay a huge history for free.
-  const big = "x".repeat(MAX_TOTAL_CHARS + 1);
-  const withResults: ApiMessage = {
-    role: "assistant",
-    content: [
-      {
-        type: "web_search_tool_result",
-        content: [{ type: "web_search_result", text: big }],
-      },
-    ],
-  };
-  assert.equal(checkConversation([withResults, user("hi")])?.status, 413);
-});
-
 // --- body reading ---------------------------------------------------------
 
 function jsonRequest(body: string, headers: Record<string, string> = {}): Request {

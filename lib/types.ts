@@ -4,9 +4,12 @@
 /** An opaque Claude content block. We never rewrite these - only store and replay. */
 export type ContentBlock = { type: string; [key: string]: unknown };
 
-/** Exactly what gets sent to the Messages API. */
+/**
+ * Exactly what gets sent to the Messages API. `system` is the
+ * mid-conversation operator channel, used to inject recalled memory.
+ */
 export type ApiMessage = {
-  role: "user" | "assistant";
+  role: "user" | "assistant" | "system";
   content: string | ContentBlock[];
 };
 
@@ -27,6 +30,8 @@ export type Source = { title: string; url: string };
 /** NDJSON frames sent from /api/chat to the browser. */
 export type StreamEvent =
   | { type: "status"; status: "searching"; query?: string }
+  /** Older turns were pulled from memory and given to the model. */
+  | { type: "recall"; count: number; since: string }
   | { type: "text"; text: string }
   | {
       type: "done";
