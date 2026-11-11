@@ -121,13 +121,37 @@ export function turnsInRange(
   return rows.map(toTurn);
 }
 
-/** Strip FTS5 operators so a user's words are never parsed as a query. */
+/**
+ * Common English function words, excluded from the search query.
+ *
+ * Without this, a turn about "a fact ABOUT the Eiffel Tower" and a question
+ * "what did I ask you ABOUT Postgres hosting" match each other on "about"
+ * alone - the OR query below means any one shared word is enough to surface
+ * a row, and a short, generic word is exactly the one every unrelated turn
+ * is likeliest to share. This does not fix OR-matching in general (two
+ * turns can still share an unrelated but substantive word), but it removes
+ * the specific failure mode where the shared word carries no topic at all.
+ */
+const STOPWORDS = new Set([
+  "the", "and", "for", "are", "was", "were", "been", "being", "have", "has",
+  "had", "with", "that", "this", "these", "those", "then", "than", "when",
+  "what", "who", "whom", "whose", "where", "why", "how", "did", "does",
+  "doing", "about", "since", "any", "all", "some", "into", "onto", "over",
+  "under", "after", "before", "again", "once", "here", "there", "you",
+  "your", "yours", "me", "myself", "him", "her", "its", "our", "ours",
+  "they", "them", "their", "will", "would", "could", "should", "can",
+  "may", "might", "must", "not", "nor", "but", "yet", "out", "off", "from",
+  "tell", "fact", "ask", "asked", "asking", "say", "said", "know", "told",
+]);
+
+/** Strip FTS5 operators and common function words so a user's words are
+ * never parsed as a query, and filler words never stand in for a topic. */
 function sanitiseQuery(query: string): string {
   const terms = query
     .toLowerCase()
     .replace(/[^\p{L}\p{N}\s]/gu, " ")
     .split(/\s+/)
-    .filter((term) => term.length > 2)
+    .filter((term) => term.length > 2 && !STOPWORDS.has(term))
     .slice(0, 12);
   if (!terms.length) return "";
   // Quoted terms, OR-ed: match on any salient word, ranked by relevance.

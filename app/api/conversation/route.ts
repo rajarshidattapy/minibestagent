@@ -2,6 +2,7 @@ import { authorizeRequest, challengeHeader } from "@/lib/auth";
 import { isValidOwnerKey, ownerFor, setOwnerCookie } from "@/lib/owner";
 import { describePrincipal, requirePermission } from "@/lib/rbac";
 import { allTurns, ownsConversation } from "@/lib/memory/store";
+import { metrics, withHttpMetrics } from "@/lib/metrics";
 
 export const runtime = "nodejs";
 
@@ -10,8 +11,15 @@ export const runtime = "nodejs";
  * the server rather than from whatever the browser happened to keep.
  */
 export async function GET(request: Request) {
+  return withHttpMetrics(request, "/api/conversation", () => handle(request));
+}
+
+async function handle(request: Request): Promise<Response> {
+  const m = metrics();
+
   const auth = await authorizeRequest(request);
   if (!auth.ok) {
+    m.authFailuresTotal.inc({ reason: auth.error ?? "no_token" });
     return Response.json(
       { error: auth.description },
       {
@@ -26,6 +34,7 @@ export async function GET(request: Request) {
   // role can read someone else's without the separate admin check below.
   const forbidden = requirePermission(auth.claims, "chat:read");
   if (forbidden) {
+    m.authFailuresTotal.inc({ reason: "forbidden:chat:read" });
     return Response.json({ error: forbidden.error }, { status: forbidden.status });
   }
 
@@ -46,6 +55,7 @@ export async function GET(request: Request) {
   if (impersonate !== null) {
     const elevated = requirePermission(auth.claims, "admin:read_any");
     if (elevated) {
+      m.authFailuresTotal.inc({ reason: "forbidden:admin:read_any" });
       return Response.json({ error: elevated.error }, { status: elevated.status });
     }
     if (!isValidOwnerKey(impersonate)) {

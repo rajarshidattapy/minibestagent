@@ -181,6 +181,22 @@ test("search text from the user is never parsed as an FTS query", () => {
   }
 });
 
+test("two unrelated turns sharing only a common function word do not match each other", () => {
+  // The query is an OR of every word past the length filter, so a shared
+  // filler word used to be enough on its own: "tell me a fact ABOUT the
+  // Eiffel Tower" and "I asked you ABOUT Postgres hosting" matched on
+  // "about" alone, with nothing to do with either topic.
+  seed("eiffel", "user", "tell me a fact about the Eiffel Tower", new Date(2026, 10, 6, 9, 0));
+  seed("pg", "user", "last Tuesday I asked you about Postgres hosting", new Date(2026, 10, 10, 9, 0));
+
+  const matches = store.searchTurns(
+    OWNER,
+    "last Tuesday I asked you about Postgres hosting. has any pricing changed since then?",
+  );
+  assert.equal(matches.length, 1);
+  assert.match(matches[0].text, /Postgres/);
+});
+
 // --- context assembly -----------------------------------------------------
 
 test("recall is injected as a system message, after the question", () => {

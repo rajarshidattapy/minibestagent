@@ -9,6 +9,7 @@ import { buildContext } from "@/lib/memory/context";
 import { appendTurn, ownsConversation } from "@/lib/memory/store";
 import { blocksToText } from "@/lib/chat";
 import { localStamp } from "@/lib/chat";
+import { metrics, withHttpMetrics } from "@/lib/metrics";
 import type { ApiMessage, ContentBlock, StreamEvent } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -79,11 +80,32 @@ function noticeFor(stopReason: string | null): string | undefined {
   return undefined;
 }
 
+/**
+ * The business outcome of a turn, for `mini_chat_outcomes_total` - distinct
+ * from the HTTP status, which is 200 the moment streaming begins regardless
+ * of how the turn concludes. A stream that ends with `stopReason ===
+ * "pause_turn"` only reaches this function once the resume budget is spent
+ * (the loop keeps resuming otherwise), so that case means exhausted, not
+ * merely paused.
+ */
+function outcomeFor(stopReason: string | null): string {
+  if (stopReason === "end_turn") return "ok";
+  if (stopReason === "pause_turn") return "pause_turn_exhausted";
+  return stopReason ?? "unknown";
+}
+
 export async function POST(request: Request) {
+  return withHttpMetrics(request, "/api/chat", () => handle(request));
+}
+
+async function handle(request: Request): Promise<Response> {
+  const m = metrics();
+
   // Authenticate before reading the body, so an unauthenticated caller cannot
   // make us do any work beyond verifying their token.
   const auth = await authorizeRequest(request);
   if (!auth.ok) {
+    m.authFailuresTotal.inc({ reason: auth.error ?? "no_token" });
     return Response.json(
       { error: auth.description },
       {
@@ -99,12 +121,14 @@ export async function POST(request: Request) {
   // can authenticate perfectly well and still be denied here.
   const forbidden = requirePermission(auth.claims, "chat:send");
   if (forbidden) {
+    m.authFailuresTotal.inc({ reason: "forbidden:chat:send" });
     return Response.json({ error: forbidden.error }, { status: forbidden.status });
   }
 
   const subject = typeof auth.claims?.sub === "string" ? auth.claims.sub : null;
   const limit = checkRateLimit(rateLimitKey(subject, request));
   if (!limit.allowed) {
+    m.rateLimitRejectionsTotal.inc({ rule: limit.rule.name });
     return Response.json(
       { error: `Too many requests. Try again in ${limit.retryAfterSeconds}s.` },
       { status: 429, headers: rateLimitHeaders(limit) },
@@ -195,6 +219,7 @@ export async function POST(request: Request) {
     },
 
     async start(controller) {
+      m.chatInFlight.inc();
       const send = (event: StreamEvent) => {
         if (clientGone) return;
         try {
@@ -225,11 +250,13 @@ export async function POST(request: Request) {
         // A hit still has to be written to memory: the conversation must read
         // the same whether or not the answer came from the model this time.
         const hit = cacheLookup(key, owner);
+        m.cacheLookupsTotal.inc({ result: hit ? "hit" : "miss" });
         if (hit) {
           send({ type: "cached", storedAt: new Date(hit.storedAt).toISOString() });
           const text = blocksToText(hit.content);
           if (text) send({ type: "text", text });
           finish(hit.content, "end_turn");
+          m.chatOutcomesTotal.inc({ outcome: "cached" });
           return;
         }
 
@@ -240,12 +267,21 @@ export async function POST(request: Request) {
             // Oldest recalled turn, so the UI can say "recalling 3 November".
             since: new Date(recalled[0].turn.ts).toISOString(),
           });
+          const hasDate = recalled.some((r) => r.reason.startsWith("from "));
+          const hasTopic = recalled.some((r) => r.reason === "earlier, on this topic");
+          m.recallInvocationsTotal.inc({
+            source: hasDate && hasTopic ? "both" : hasDate ? "date" : "topic",
+          });
         }
 
         // One logical assistant turn. A server-paused turn resumes in place and
         // its blocks are appended here, so history stays strictly alternating.
         const turn: ContentBlock[] = [];
         let stopReason: string | null = null;
+        let responseModel: string | undefined;
+        // Spans every resume: that is the real wait for this turn's answer,
+        // not any one upstream call in isolation.
+        const endLlmTimer = m.llmRequestDuration.startTimer({ cached: "false" });
 
         for (let resume = 0; ; resume++) {
           const outgoing = [
@@ -307,18 +343,29 @@ export async function POST(request: Request) {
           const message = await stream.finalMessage();
           turn.push(...(message.content as unknown as ContentBlock[]));
           stopReason = message.stop_reason;
+          responseModel = message.model;
+          // Accumulated across every resume, not just the last one - a
+          // paused-and-resumed turn is billed for all of its calls, and a
+          // fallback changes `message.model` mid-turn, which this then
+          // attributes correctly rather than to the model we asked for.
+          m.llmTokensTotal.inc({ model: message.model, direction: "input" }, message.usage.input_tokens);
+          m.llmTokensTotal.inc({ model: message.model, direction: "output" }, message.usage.output_tokens);
 
           if (stopReason !== "pause_turn" || resume >= MAX_RESUMES) break;
         }
+        endLlmTimer({ model: responseModel ?? MODEL });
 
         // Only cache a complete answer. A truncated or declined turn is not
         // something to hand to the next caller.
         if (stopReason === "end_turn") cacheStore(key, owner, turn);
 
         finish(turn, stopReason);
+        m.chatOutcomesTotal.inc({ outcome: outcomeFor(stopReason) });
       } catch (err) {
         send({ type: "error", message: describeError(err) });
+        m.chatOutcomesTotal.inc({ outcome: "error" });
       } finally {
+        m.chatInFlight.dec();
         try {
           controller.close();
         } catch {

@@ -50,6 +50,27 @@ Roles come from the verified token's own claims, so there is no second place for
 
 Every admin read of another user's conversation is written to the server log with the admin's subject and the target, since impersonating a read is exactly the kind of action an audit trail exists for.
 
+## Evals
+
+`evals/cases.ts` is a small corpus built directly on the brief's own three example questions (CRM pricing, "what did I ask on 3 November", Postgres hosting) plus five more covering memory controls and agent behaviour: recall must not false-positive on a plain question, must reach across conversation threads (not just the current one), must follow topically with no date named, must not search for arithmetic, and must not obey an instruction planted in a recalled past turn.
+
+```bash
+npm run eval       # structural mode: free, deterministic, no API key needed
+npm run eval:live  # calls the real model and grades what it actually said - spends money
+```
+
+**Structural mode** (the default) answers every call with a mock model and grades only what does not depend on what the model says: did memory recall fire, from the right day, across threads, and - just as importantly - did it *not* fire on an unrelated question. This is what caught a real bug while building the harness: `lib/memory/store.ts`'s topic search had no stopword filter, so two completely unrelated turns that happened to share a word like "about" would match each other. Fixed, and now a named regression case in both the eval corpus and the unit tests.
+
+**Live mode** needs a real `ANTHROPIC_API_KEY` already set in the environment - it refuses to run rather than silently falling back to the mock if one isn't there, since a "live" result that was actually a cache of mock answers would be worse than no result. It additionally grades the model's actual answer: does it mention the specific tools/numbers it was told about, does it search when the question needs current information and skip searching for arithmetic, and does it resist an instruction smuggled into recalled memory. Grading is keyword/phrase matching (an "AND of OR-groups" rubric per case), not an LLM judge - cheaper, deterministic, and its limits are named rather than hidden: a model that answers correctly but phrases it unexpectedly can read as a false fail.
+
+## Observability
+
+`GET /api/metrics` serves Prometheus exposition text: request counts and latency per route, LLM call latency and tokens (labelled by the model that actually answered, so a server-side fallback shows up), cache hit/miss rate, rate-limit rejections, auth/permission failures by reason, and memory recall invocations - plus default Node process metrics (CPU, memory, event-loop lag, GC) from `collectDefaultMetrics`. No label carries a user id, subject, or conversation id; those stay inside the access-controlled conversation data, not an operational surface scraped by infrastructure.
+
+A Prometheus scrape config authenticates with a static bearer token (`authorization: { credentials: ... }` in `scrape_configs:`), not an OAuth2 flow, so the endpoint has its own shared secret, `METRICS_TOKEN`, checked in constant time. Unset in production, it fails closed the same way the OIDC gate does - `METRICS_OPEN=true` is the explicit opt-out for a deployment where the endpoint is already behind a private network.
+
+Because `/api/chat` streams, its HTTP status is 200 the instant streaming begins, regardless of how the turn actually concludes - that is a real limitation of status codes on SSE, not an oversight. `mini_chat_outcomes_total{outcome}` is the metric that answers "did it actually work": `ok`, `cached`, `max_tokens`, `refusal`, `pause_turn_exhausted`, or `error`, recorded once the stream itself finishes.
+
 ## Response cache
 
 Repeat questions are answered from a cache stored alongside memory in SQLite, so it survives restarts. The key is a hash of the whole prompt with the clock scrubbed to day precision — same question later the same day hits; the next day it does not, because date-relative questions ("what did I ask yesterday?") would otherwise get the wrong answer. Only the hash is stored, never the prompt.
@@ -65,7 +86,7 @@ npm run typecheck
 npm run build
 ```
 
-`npm run verify` runs five end-to-end suites against a real server on a throwaway database: `verify:memory` (date and topic recall, per-owner isolation, reload), `verify:cache` (counts calls reaching a stand-in model endpoint, and restarts the server to prove the cache is on disk), `verify:rbac` (mints tokens with different roles and checks both denial and elevation over real HTTP), `verify:oidc` (token verification against a local OIDC issuer), and `verify:guardrails` (limits and security headers).
+`npm run verify` runs six end-to-end suites against a real server on a throwaway database: `verify:memory` (date and topic recall, per-owner isolation, reload), `verify:cache` (counts calls reaching a stand-in model endpoint, and restarts the server to prove the cache is on disk), `verify:rbac` (mints tokens with different roles and checks both denial and elevation over real HTTP), `verify:metrics` (drives chat/cache/auth/rate-limit traffic and checks the exposition text actually moved), `verify:oidc` (token verification against a local OIDC issuer), and `verify:guardrails` (limits and security headers).
 
 ## Layout
 
@@ -81,6 +102,8 @@ npm run build
 | `lib/cache.ts`          | Response cache: scrubbed prompt hash, TTL by whether it searched.                 |
 | `lib/db.ts`             | The shared SQLite connection and schema.                                          |
 | `lib/rbac.ts`           | Roles and permissions, read from the token's own claims.                          |
+| `lib/metrics.ts`        | The Prometheus registry and every counter/histogram/gauge.                        |
+| `lib/metrics-auth.ts`   | Static bearer-token gate for /api/metrics.                                        |
 | `lib/types.ts`          | Shared shapes, deliberately free of SDK imports so the client bundle stays small. |
 | `lib/auth.ts`           | Token verification: signature, issuer, audience, expiry.                          |
 | `lib/oauth.ts`          | Browser sign-in: Authorization Code + PKCE, token refresh.                        |
