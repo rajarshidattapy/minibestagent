@@ -1,4 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
+import { authorizeRequest, challengeHeader } from "@/lib/auth";
 import type { ApiMessage, ContentBlock, StreamEvent } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -65,6 +66,20 @@ function noticeFor(stopReason: string | null): string | undefined {
 }
 
 export async function POST(request: Request) {
+  // Authenticate before reading the body, so an unauthenticated caller cannot
+  // make us do any work beyond verifying their token.
+  const auth = await authorizeRequest(request);
+  if (!auth.ok) {
+    return Response.json(
+      { error: auth.description },
+      {
+        status: auth.status,
+        headers:
+          auth.status === 401 ? { "WWW-Authenticate": challengeHeader(auth) } : undefined,
+      },
+    );
+  }
+
   let messages: ApiMessage[];
   try {
     const body = (await request.json()) as { messages?: unknown };

@@ -84,6 +84,44 @@ Every path that produces an incomplete answer says so, rather than rendering a p
 | Search returned an error object | "Search failed: `<error_code>`." |
 | Auth / rate limit / connection | Specific-first error chain (`AuthenticationError` → `RateLimitError` → `APIConnectionError` → `APIError`), sent as an `error` frame. |
 
+## Authentication
+
+`/api/chat` is an OAuth 2.0 **resource server**. Browser sign-in uses **Authorization Code + PKCE** (RFC 7636) — no client secret, because anything shipped to a browser is readable by its user.
+
+### The four checks
+
+Every token clears four independent checks in `lib/auth.ts` before a request is served. Any one failing is a 401 with an RFC 6750 `WWW-Authenticate` challenge.
+
+| Check | How |
+|---|---|
+| **Signature** | Verified against the issuer's public JWKS, fetched via OIDC discovery and cached. The `kid` in the token header selects the key. |
+| **Issuer** | `iss` must equal `OIDC_ISSUER` exactly. The discovery document's own `issuer` is also checked against it, so a hijacked discovery response cannot point us at someone else's keys. |
+| **Audience** | `aud` must contain `OIDC_AUDIENCE`. This is what stops a valid token minted for a *different* API behind the same issuer from working here. |
+| **Expiry** | `exp` is enforced with 60s of clock tolerance, and `exp` is a *required* claim — a token without one would otherwise pass the expiry check vacuously and never die. `nbf` is honoured too. |
+
+### The algorithm allowlist
+
+`ALLOWED_ALGORITHMS` is asymmetric-only and is the single most important line in the file. Without it:
+
+- a token declaring `alg: "none"` verifies with no signature at all; and
+- a token signed **HS256** can be forged by anyone, using the issuer's *public* key as the HMAC secret — the classic algorithm-confusion attack, since the public key is by definition public.
+
+Both are covered by tests that attempt the forgery and assert rejection.
+
+### Failing closed
+
+`authMode()` has three states, and the default on any ambiguity is to refuse:
+
+- **`enforced`** — issuer and audience both set.
+- **`disabled`** — nothing set, outside production. A local convenience.
+- **`misconfigured`** — anything else, including *half*-configured and production-without-config. Returns 500 and serves nothing.
+
+Running an open endpoint in production therefore requires typing `AUTH_OPTIONAL=true` in full. A typo'd or forgotten variable can never silently produce a public endpoint — the failure is loud and immediate rather than invisible.
+
+### Known tradeoff: token storage
+
+Access and refresh tokens live in `sessionStorage`, so they are script-readable and an XSS bug would expose them; they are at least scoped to the tab and die with it. This is the standard SPA tradeoff and it buys the stateless, one-variable deploy. If that is not acceptable for your threat model, the alternative is a backend-for-frontend: keep tokens in `httpOnly`, `SameSite=Strict` cookies and have the Next server attach them — which costs a client secret and server-side session state.
+
 ## What is intentionally left out
 
 - **No RAG or vector memory** — transcript plus inline timestamps already answers "what did I ask, and when"; at this scale 1M context makes retrieval pure overhead.
@@ -94,6 +132,12 @@ Every path that produces an incomplete answer says so, rather than rendering a p
 
 ## Tests
 
-`lib/chat.test.ts` (`npm run test`) covers the parsing layer, where silent breakage would otherwise live: NDJSON frames reassembled across chunk boundaries that do not align with newlines, citation extraction and URL dedupe, the failed-search error object that must not be indexed as a list, text extraction across mixed block types, and the local-time stamp the model is handed.
+`npm run test` covers the two layers where breakage would otherwise be silent.
 
-Verified locally: `npm run test` (5/5), `npm run typecheck`, `npm run build`, and the route's streaming, validation, and error paths over HTTP. Live model output needs a real `ANTHROPIC_API_KEY`.
+**`lib/chat.test.ts`** — the parsing layer: NDJSON frames reassembled across chunk boundaries that do not align with newlines, citation extraction and URL dedupe, the failed-search error object that must not be indexed as a list, text extraction across mixed block types, and the local-time stamp the model is handed.
+
+**`lib/auth.test.ts`** — token verification, against a real key pair generated in the test. Alongside the happy path it asserts rejection of: a token signed by an unrelated key, a tampered payload, `alg: "none"`, an HS256 token signed with the public key as the secret, the wrong issuer, the wrong audience, an expired token, a token with *no* expiry, and a `nbf` in the future. It also pins the clock-skew boundary and the fail-closed configuration matrix.
+
+**`npm run verify:oidc`** stands up a throwaway OIDC issuer on localhost — serving a real discovery document and JWKS — and drives the running app over HTTP. This covers what the unit tests inject around: discovery, remote JWKS fetching, and `kid` lookup.
+
+Verified locally: 21/21 unit tests, 6/6 end-to-end OIDC probes, `npm run typecheck`, `npm run build`, and the gate's behaviour in all five configuration states over HTTP. Live model output still needs a real `ANTHROPIC_API_KEY`, and the browser PKCE flow needs a real identity provider.

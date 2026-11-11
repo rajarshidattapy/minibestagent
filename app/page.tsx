@@ -10,6 +10,14 @@ import {
   readEvents,
   searchErrors,
 } from "@/lib/chat";
+import {
+  authEnabled,
+  beginLogin,
+  currentUser,
+  getAccessToken,
+  isSignedIn,
+  logout,
+} from "@/lib/oauth";
 
 const STORAGE_KEY = "mini.history.v1";
 
@@ -31,6 +39,11 @@ export default function Page() {
   const [input, setInput] = useState("");
   const [pending, setPending] = useState<Pending | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [user, setUser] = useState<string | null>(null);
+
+  // Only meaningful once mounted: sign-in state lives in sessionStorage.
+  const requiresAuth = authEnabled();
+  const signedIn = !requiresAuth || user !== null;
 
   const threadRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -44,6 +57,7 @@ export default function Page() {
     } catch {
       // Corrupt or unavailable storage - start clean rather than crash.
     }
+    if (isSignedIn()) setUser(currentUser());
     setLoaded(true);
   }, []);
 
@@ -64,6 +78,15 @@ export default function Page() {
     async (raw: string) => {
       const text = raw.trim();
       if (!text || pending) return;
+
+      // Refreshes the token if it is close to expiry, so a long-idle tab does
+      // not send a request that is guaranteed to come back 401.
+      const token = requiresAuth ? await getAccessToken() : null;
+      if (requiresAuth && !token) {
+        setUser(null);
+        setError("Your session has expired. Please sign in again.");
+        return;
+      }
 
       setError(null);
       setInput("");
@@ -90,7 +113,10 @@ export default function Page() {
       try {
         const response = await fetch("/api/chat", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          },
           signal: controller.signal,
           body: JSON.stringify({
             messages: next.map(({ role, content }) => ({ role, content })),
@@ -102,6 +128,9 @@ export default function Page() {
             .json()
             .then((d: { error?: string }) => d.error)
             .catch(() => null);
+          // The server rejected the token - drop back to the sign-in prompt
+          // rather than leaving the user typing into a dead session.
+          if (response.status === 401) setUser(null);
           throw new Error(detail ?? `Request failed (${response.status}).`);
         }
 
@@ -141,7 +170,7 @@ export default function Page() {
         setPending(null);
       }
     },
-    [history, pending],
+    [history, pending, requiresAuth],
   );
 
   const clear = () => {
@@ -160,17 +189,46 @@ export default function Page() {
             Web search, and a memory of what you asked and when.
           </div>
         </div>
-        <button
-          className="ghost-button"
-          onClick={clear}
-          disabled={!history.length}
-        >
-          Clear
-        </button>
+        <div className="header-actions">
+          {loaded && requiresAuth && (
+            signedIn ? (
+              <>
+                <span className="who" title={user ?? undefined}>
+                  {user}
+                </span>
+                <button className="ghost-button" onClick={() => void logout()}>
+                  Sign out
+                </button>
+              </>
+            ) : (
+              <button className="ghost-button" onClick={() => void beginLogin("/")}>
+                Sign in
+              </button>
+            )
+          )}
+          <button
+            className="ghost-button"
+            onClick={clear}
+            disabled={!history.length}
+          >
+            Clear
+          </button>
+        </div>
       </header>
 
       <div className="thread" ref={threadRef}>
-        {loaded && !history.length && !pending && (
+        {loaded && !signedIn && (
+          <div className="empty">
+            <p>Sign in to start chatting.</p>
+            <div className="examples">
+              <button className="chip" onClick={() => void beginLogin("/")}>
+                Sign in
+              </button>
+            </div>
+          </div>
+        )}
+
+        {loaded && signedIn && !history.length && !pending && (
           <div className="empty">
             <p>Ask anything.</p>
             <p>It searches the web when the answer needs to be current.</p>
@@ -188,9 +246,7 @@ export default function Page() {
           </div>
         )}
 
-        {history.map((turn) => (
-          <Turn key={turn.id} turn={turn} />
-        ))}
+        {signedIn && history.map((turn) => <Turn key={turn.id} turn={turn} />)}
 
         {pending && (
           <div className="turn assistant">
@@ -229,7 +285,8 @@ export default function Page() {
           ref={textareaRef}
           value={input}
           rows={1}
-          placeholder="Ask anything..."
+          disabled={!signedIn}
+          placeholder={signedIn ? "Ask anything..." : "Sign in to start chatting"}
           onChange={(e) => {
             setInput(e.target.value);
             e.target.style.height = "auto";
@@ -251,7 +308,11 @@ export default function Page() {
             Stop
           </button>
         ) : (
-          <button type="submit" className="send" disabled={!input.trim()}>
+          <button
+            type="submit"
+            className="send"
+            disabled={!input.trim() || !signedIn}
+          >
             Send
           </button>
         )}

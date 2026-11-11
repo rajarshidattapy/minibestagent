@@ -8,10 +8,12 @@
     "start": "next start",
     "typecheck": "tsc --noEmit",
     "test": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test \"lib/**/*.test.ts\"",
+    "verify:oidc": "node scripts/verify-oidc.mjs",
     "lint": "next lint"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^1.8.0",
+    "jose": "^6.2.17",
     "next": "^16.4.6",
     "react": "^19.2.0",
     "react-dom": "^19.2.0"
