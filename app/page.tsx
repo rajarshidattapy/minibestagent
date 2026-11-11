@@ -33,6 +33,7 @@ type Pending = {
   searching: boolean;
   query?: string;
   recall?: { count: number; since: string };
+  cachedAt?: string;
 };
 
 export default function Page() {
@@ -147,6 +148,8 @@ export default function Page() {
             setPending((p) =>
               p ? { ...p, searching: true, query: event.query ?? p.query } : p,
             );
+          } else if (event.type === "cached") {
+            setPending((p) => (p ? { ...p, cachedAt: event.storedAt } : p));
           } else if (event.type === "recall") {
             setPending((p) =>
               p ? { ...p, recall: { count: event.count, since: event.since } } : p,
@@ -271,6 +274,11 @@ export default function Page() {
                 Recalling {pending.recall.count} earlier message
                 {pending.recall.count === 1 ? "" : "s"} from{" "}
                 {dayLabel(pending.recall.since)}
+              </div>
+            )}
+            {pending.cachedAt && (
+              <div className="status recall">
+                Answered from cache ({clockLabel(pending.cachedAt)})
               </div>
             )}
             {pending.searching && (

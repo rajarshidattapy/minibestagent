@@ -1,18 +1,13 @@
-import { DatabaseSync } from "node:sqlite";
-import { mkdirSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { database, _resetForTests as resetDb } from "../db.ts";
 import type { ContentBlock } from "../types";
 
 /**
  * Durable, server-side conversation memory.
  *
- * SQLite via `node:sqlite` - built into Node, so `npm install` adds nothing.
- * It buys three things the browser could not: memory that survives a cleared
- * cache or a different device, recall by date, and full-text recall by topic.
- *
- * The schema is deliberately small, and every query the agent needs is an
- * index hit. To move this to Postgres, reimplement `Store` - nothing outside
- * this file knows it is SQLite.
+ * Recall by date and by topic is what makes "what did I ask you on
+ * 3 November?" answerable. The connection and schema live in lib/db.ts;
+ * to move this to Postgres, reimplement the functions below - nothing
+ * outside this file knows it is SQLite.
  */
 
 export type Turn = {
@@ -28,76 +23,6 @@ export type Turn = {
 };
 
 export type NewTurn = Omit<Turn, "id">;
-
-/**
- * Read at connect time, not import time, so tests can redirect it.
- *
- * The default is statically scoped to ./data. Composing it with
- * `path.resolve` on a variable instead makes the bundler trace the whole
- * project and ship every source file with the server bundle.
- */
-function dbPath(): string {
-  const override = process.env.MEMORY_DB_PATH;
-  return override ? override : join(process.cwd(), "data", "mini.db");
-}
-
-let db: DatabaseSync | null = null;
-
-function database(): DatabaseSync {
-  if (db) return db;
-
-  const path = dbPath();
-  mkdirSync(dirname(path), { recursive: true });
-  db = new DatabaseSync(path);
-
-  // WAL keeps reads from blocking the write of the turn in flight.
-  db.exec("PRAGMA journal_mode = WAL");
-  db.exec("PRAGMA foreign_keys = ON");
-
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS conversations (
-      id          TEXT PRIMARY KEY,
-      owner       TEXT NOT NULL,
-      created_at  INTEGER NOT NULL,
-      updated_at  INTEGER NOT NULL
-    );
-
-    CREATE INDEX IF NOT EXISTS conversations_owner
-      ON conversations (owner, updated_at DESC);
-
-    CREATE TABLE IF NOT EXISTS turns (
-      id              INTEGER PRIMARY KEY AUTOINCREMENT,
-      conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
-      owner           TEXT NOT NULL,
-      role            TEXT NOT NULL,
-      ts              INTEGER NOT NULL,
-      text            TEXT NOT NULL,
-      content         TEXT NOT NULL
-    );
-
-    -- Recall by conversation (the running thread) and by date (the "what did
-    -- I ask on 3 November" case, which may span conversations).
-    CREATE INDEX IF NOT EXISTS turns_conversation ON turns (conversation_id, id);
-    CREATE INDEX IF NOT EXISTS turns_owner_ts     ON turns (owner, ts);
-
-    -- Topical recall. An external-content table so the text is not stored twice.
-    CREATE VIRTUAL TABLE IF NOT EXISTS turns_fts
-      USING fts5(text, content='turns', content_rowid='id', tokenize='porter unicode61');
-  `);
-
-  // Keep the index in step with the table from inside the database, so no
-  // write path can forget to update it.
-  db.exec(`
-    CREATE TRIGGER IF NOT EXISTS turns_ai AFTER INSERT ON turns BEGIN
-      INSERT INTO turns_fts(rowid, text) VALUES (new.id, new.text);
-    END;
-    CREATE TRIGGER IF NOT EXISTS turns_ad AFTER DELETE ON turns BEGIN
-      INSERT INTO turns_fts(turns_fts, rowid, text) VALUES ('delete', old.id, old.text);
-    END;
-  `);
-
-  return db;
-}
 
 type Row = {
   id: number;
@@ -239,8 +164,4 @@ export function conversationSize(conversationId: string): number {
 }
 
 /** Test seam: point the module at a throwaway database. */
-export function _resetForTests(path: string): void {
-  db?.close();
-  db = null;
-  process.env.MEMORY_DB_PATH = path;
-}
+export const _resetForTests = resetDb;

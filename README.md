@@ -42,16 +42,22 @@ The rules allow one tool, so memory is not one: retrieval runs server-side befor
 
 Signed in, memory follows you across devices. Signed out, it is scoped to the browser by an `httpOnly` cookie. The database lives at `./data/mini.db` (override with `MEMORY_DB_PATH`).
 
+## Response cache
+
+Repeat questions are answered from a cache stored alongside memory in SQLite, so it survives restarts. The key is a hash of the whole prompt with the clock scrubbed to day precision — same question later the same day hits; the next day it does not, because date-relative questions ("what did I ask yesterday?") would otherwise get the wrong answer. Only the hash is stored, never the prompt.
+
+Freshness is handled by expiry rather than the key: **15 minutes** for answers built from a web search, **12 hours** otherwise. Entries are per-user by default. Set `LLM_CACHE=off` to disable, or `LLM_CACHE_SCOPE=global` to share identical cold-start questions across users.
+
 ## Checks
 
 ```bash
-npm run test       # 54 unit tests: dates, recall, parsing, token verification, guardrails
+npm run test       # 70 unit tests: dates, recall, cache keys, parsing, tokens, guardrails
 npm run verify     # all three HTTP suites below
 npm run typecheck
 npm run build
 ```
 
-`npm run verify` runs three end-to-end suites against a real server on a throwaway database: `verify:memory` (date and topic recall, per-owner isolation, reload), `verify:oidc` (token verification against a local OIDC issuer), and `verify:guardrails` (limits and security headers).
+`npm run verify` runs four end-to-end suites against a real server on a throwaway database: `verify:memory` (date and topic recall, per-owner isolation, reload), `verify:cache` (counts calls reaching a stand-in model endpoint, and restarts the server to prove the cache is on disk), `verify:oidc` (token verification against a local OIDC issuer), and `verify:guardrails` (limits and security headers).
 
 ## Layout
 
@@ -64,6 +70,8 @@ npm run build
 | `lib/memory/dates.ts`   | Turns "3 November" / "last Tuesday" into day ranges.                              |
 | `lib/memory/store.ts`   | Durable turns in SQLite, with full-text search.                                   |
 | `lib/memory/context.ts` | Assembles each request: live thread + date recall + topic recall.                 |
+| `lib/cache.ts`          | Response cache: scrubbed prompt hash, TTL by whether it searched.                 |
+| `lib/db.ts`             | The shared SQLite connection and schema.                                          |
 | `lib/types.ts`          | Shared shapes, deliberately free of SDK imports so the client bundle stays small. |
 | `lib/auth.ts`           | Token verification: signature, issuer, audience, expiry.                          |
 | `lib/oauth.ts`          | Browser sign-in: Authorization Code + PKCE, token refresh.                        |

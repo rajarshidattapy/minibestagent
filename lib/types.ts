@@ -38,6 +38,8 @@ export type StreamEvent =
   | { type: "status"; status: "searching"; query?: string }
   /** Older turns were pulled from memory and given to the model. */
   | { type: "recall"; count: number; since: string }
+  /** Served from the response cache; no model call was made. */
+  | { type: "cached"; storedAt: string }
   | { type: "text"; text: string }
   | {
       type: "done";

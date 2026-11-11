@@ -3,6 +3,7 @@ import { authorizeRequest, challengeHeader } from "@/lib/auth";
 import { MAX_MESSAGE_CHARS, readBoundedJson } from "@/lib/guardrails";
 import { checkRateLimit, rateLimitHeaders, rateLimitKey } from "@/lib/rate-limit";
 import { ownerFor, setOwnerCookie } from "@/lib/owner";
+import { cacheKey, lookup as cacheLookup, store as cacheStore } from "@/lib/cache";
 import { buildContext } from "@/lib/memory/context";
 import { appendTurn, ownsConversation } from "@/lib/memory/store";
 import { blocksToText } from "@/lib/chat";
@@ -17,6 +18,8 @@ const MODEL = "claude-opus-5-5";
 const MAX_TOKENS = 16000;
 /** Caps how many times we resume a server-paused turn before giving up. */
 const MAX_RESUMES = 4;
+/** Named once so the cache key and the request can never disagree. */
+const EFFORT = "low" as const;
 
 // Frozen byte-for-byte: everything that varies per turn travels in the
 // messages, so the cached prefix survives from one request to the next.
@@ -156,6 +159,17 @@ export async function POST(request: Request) {
   const client = new Anthropic({ timeout: 55_000, maxRetries: 1 });
   const encoder = new TextEncoder();
 
+  // Keyed on everything that could change the answer, with the clock scrubbed
+  // to day precision. Built from the same values sent below - if they drift
+  // apart, the cache starts lying.
+  const key = cacheKey({
+    model: MODEL,
+    system: SYSTEM_PROMPT,
+    effort: EFFORT,
+    tools: [WEB_SEARCH],
+    messages,
+  });
+
   // Set when the reader goes away - Stop, a closed tab, a dropped network.
   //
   // Enqueueing to a cancelled controller throws. Unguarded, that throw
@@ -181,7 +195,35 @@ export async function POST(request: Request) {
         }
       };
 
+      /** Record the answer in memory, then close out the stream. */
+      const finish = (content: ContentBlock[], stopReason: string | null) => {
+        // Persist before telling the client we are done, so a reload can
+        // never show a conversation the server does not have.
+        appendTurn(
+          {
+            conversationId,
+            role: "assistant",
+            ts: Date.now(),
+            text: blocksToText(content),
+            content,
+          },
+          owner,
+        );
+        send({ type: "done", content, stopReason, notice: noticeFor(stopReason) });
+      };
+
       try {
+        // A hit still has to be written to memory: the conversation must read
+        // the same whether or not the answer came from the model this time.
+        const hit = cacheLookup(key, owner);
+        if (hit) {
+          send({ type: "cached", storedAt: new Date(hit.storedAt).toISOString() });
+          const text = blocksToText(hit.content);
+          if (text) send({ type: "text", text });
+          finish(hit.content, "end_turn");
+          return;
+        }
+
         if (recalled.length) {
           send({
             type: "recall",
@@ -207,7 +249,7 @@ export async function POST(request: Request) {
             max_tokens: MAX_TOKENS,
             // Chat is latency-sensitive: low effort means less preamble and a
             // faster first answer. Opus 5.5 defaults to medium, so be explicit.
-            output_config: { effort: "low" },
+            output_config: { effort: EFFORT },
             // Thinking is omitted entirely: that is adaptive on this model.
             system: SYSTEM_PROMPT,
             tools: [WEB_SEARCH],
@@ -260,25 +302,11 @@ export async function POST(request: Request) {
           if (stopReason !== "pause_turn" || resume >= MAX_RESUMES) break;
         }
 
-        // Persist before telling the client we are done, so a reload can
-        // never show a conversation the server does not have.
-        appendTurn(
-          {
-            conversationId,
-            role: "assistant",
-            ts: Date.now(),
-            text: blocksToText(turn),
-            content: turn,
-          },
-          owner,
-        );
+        // Only cache a complete answer. A truncated or declined turn is not
+        // something to hand to the next caller.
+        if (stopReason === "end_turn") cacheStore(key, owner, turn);
 
-        send({
-          type: "done",
-          content: turn,
-          stopReason,
-          notice: noticeFor(stopReason),
-        });
+        finish(turn, stopReason);
       } catch (err) {
         send({ type: "error", message: describeError(err) });
       } finally {
