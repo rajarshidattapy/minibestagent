@@ -148,17 +148,38 @@ export async function POST(request: Request) {
   );
 
   // Recent thread + date recall + topical recall, assembled server-side.
-  // `text`, not `question.content`: the timestamp prefix must not reach the
-  // date parser, or every message reads as naming today.
-  const { messages, recalled } = buildContext(owner, conversationId, question, text);
+  // The question was just stored, so it is already the last turn of the
+  // thread. `text` rather than the stored content, so the timestamp prefix
+  // never reaches the date parser.
+  const { messages, recalled } = buildContext(owner, conversationId, text);
 
   const client = new Anthropic({ timeout: 55_000, maxRetries: 1 });
   const encoder = new TextEncoder();
 
+  // Set when the reader goes away - Stop, a closed tab, a dropped network.
+  //
+  // Enqueueing to a cancelled controller throws. Unguarded, that throw
+  // escapes the loop before the answer is written to the store, so the user
+  // stops reading and the answer is lost from memory, and the request ends in
+  // an unhandled rejection. Next's Node server does not currently propagate
+  // the disconnect, so this is latent here - but it is one platform away from
+  // real, and the guard costs nothing.
+  let clientGone = false;
+
   const body = new ReadableStream<Uint8Array>({
+    cancel() {
+      clientGone = true;
+    },
+
     async start(controller) {
-      const send = (event: StreamEvent) =>
-        controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`));
+      const send = (event: StreamEvent) => {
+        if (clientGone) return;
+        try {
+          controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`));
+        } catch {
+          clientGone = true;
+        }
+      };
 
       try {
         if (recalled.length) {
@@ -261,7 +282,11 @@ export async function POST(request: Request) {
       } catch (err) {
         send({ type: "error", message: describeError(err) });
       } finally {
-        controller.close();
+        try {
+          controller.close();
+        } catch {
+          // Already closed by the reader going away.
+        }
       }
     },
   });

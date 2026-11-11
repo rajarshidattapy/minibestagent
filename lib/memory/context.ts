@@ -1,4 +1,4 @@
-import type { ApiMessage } from "../types";
+import type { ApiMessage, ContentBlock } from "../types";
 // Explicit extensions: Node's test runner resolves these directly, and the
 // bundler is equally happy with them.
 import { formatDay, mentionsThePast, resolveDateReferences } from "./dates.ts";
@@ -120,30 +120,64 @@ export function renderRecall(recalled: Recalled[], now: Date = new Date()): stri
  * Assemble the messages for one request: the live thread, the new question,
  * and - when the question reaches back - a recall block.
  */
+function toBlocks(content: string | ContentBlock[]): ContentBlock[] {
+  return typeof content === "string" ? [{ type: "text", text: content }] : content;
+}
+
+/**
+ * Make the thread safe to send: alternating roles, starting with the user.
+ *
+ * A turn whose answer never arrived - the stream errored, the tab closed -
+ * leaves two user turns in a row, and a window that cuts mid-conversation
+ * can begin on an assistant turn. Both are shapes the Messages API does not
+ * accept, and both are reachable in ordinary use.
+ */
+function normaliseThread(messages: ApiMessage[]): ApiMessage[] {
+  const merged: ApiMessage[] = [];
+
+  for (const message of messages) {
+    const last = merged[merged.length - 1];
+    if (last && last.role === message.role) {
+      last.content =
+        typeof last.content === "string" && typeof message.content === "string"
+          ? `${last.content}\n\n${message.content}`
+          : [...toBlocks(last.content), ...toBlocks(message.content)];
+      continue;
+    }
+    merged.push({ ...message });
+  }
+
+  // A conversation must open on the user.
+  while (merged.length && merged[0].role !== "user") merged.shift();
+  return merged;
+}
+
+/**
+ * Assemble the messages for one request.
+ *
+ * The caller has already stored the new question, so it arrives as the last
+ * turn of the thread - it must not be appended a second time.
+ */
 export function buildContext(
   owner: string,
   conversationId: string,
-  question: ApiMessage,
   /**
-   * The user's words alone. Deliberately not `question.content`, which
+   * The user's words alone. Deliberately not the stored content, which
    * carries the `[2026-11-11 14:32]` prefix - feeding that to the date
-   * parser makes every single message look like it names today's date, and
-   * every turn pays for a recall it never asked for.
+   * parser makes every message look like it names today's date, and every
+   * turn pays for a recall it never asked for.
    */
   questionText: string,
   now: Date = new Date(),
 ): BuiltContext {
   const thread = recentTurns(conversationId, RECENT_TURNS);
-  const messages: ApiMessage[] = thread.map((turn) => ({
-    role: turn.role,
-    content: turn.content,
-  }));
+  const messages = normaliseThread(
+    thread.map((turn) => ({ role: turn.role, content: turn.content })),
+  );
 
   // The thread is already in the prompt verbatim; do not repeat it in recall.
   const inThread = new Set(thread.map((turn) => turn.id));
   const recalled = gatherRecall(owner, questionText, inThread, now);
-
-  messages.push(question);
 
   const block = renderRecall(recalled, now);
   if (block) {

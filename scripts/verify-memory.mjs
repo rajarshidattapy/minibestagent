@@ -12,6 +12,7 @@
  * Usage: node scripts/verify-memory.mjs
  */
 import { spawn } from "node:child_process";
+import { createServer } from "node:http";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -69,6 +70,43 @@ seed("noise", "user", "how do I bake sourdough bread?", daysAgo(6));
 
 const monthDay = crmDay.toLocaleDateString("en-GB", { day: "numeric", month: "long" });
 
+/**
+ * A stand-in for the Anthropic API that records the request body and replies
+ * with a minimal valid stream. Without this the end-to-end runs never got
+ * past the auth error, so nothing ever checked what was actually sent - which
+ * is exactly how a duplicated user message went unnoticed.
+ */
+const UPSTREAM_PORT = 3136;
+const captured = [];
+
+const upstream = createServer((req, res) => {
+  let raw = "";
+  req.on("data", (chunk) => (raw += chunk));
+  req.on("end", () => {
+    try {
+      captured.push(JSON.parse(raw));
+    } catch {
+      captured.push(null);
+    }
+
+    const frames = [
+      { type: "message_start", message: { id: "msg_1", type: "message", role: "assistant", model: "mock", content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 1, output_tokens: 1 } } },
+      { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+      { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "ok" } },
+      { type: "content_block_stop", index: 0 },
+      { type: "message_delta", delta: { stop_reason: "end_turn", stop_sequence: null }, usage: { output_tokens: 1 } },
+      { type: "message_stop" },
+    ];
+
+    res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" });
+    for (const frame of frames) {
+      res.write(`event: ${frame.type}\ndata: ${JSON.stringify(frame)}\n\n`);
+    }
+    res.end();
+  });
+});
+await new Promise((r) => upstream.listen(UPSTREAM_PORT, r));
+
 const nextBin = fileURLToPath(new URL("../node_modules/next/dist/bin/next", import.meta.url));
 const app = spawn(process.execPath, [nextBin, "start", "-p", String(PORT)], {
   env: {
@@ -77,6 +115,8 @@ const app = spawn(process.execPath, [nextBin, "start", "-p", String(PORT)], {
     MEMORY_DB_PATH: dbPath,
     AUTH_OPTIONAL: "true",
     ANTHROPIC_API_KEY: "sk-ant-dummy-for-memory-test",
+    // Point the SDK at the recorder above instead of the real API.
+    ANTHROPIC_BASE_URL: `http://localhost:${UPSTREAM_PORT}`,
   },
   stdio: "ignore",
 });
@@ -165,8 +205,94 @@ try {
     transcript.turns?.length === 2 && transcript.turns[0].text.includes("CRM"),
     `${transcript.turns?.length ?? 0} turns returned`,
   );
+
+  // `notice` is a client-side warning, never persisted. When the two shared
+  // one field, every reloaded answer rendered twice - once as the reply and
+  // again as a warning underneath it.
+  check(
+    "reloaded turns carry no notice field",
+    (transcript.turns ?? []).every((t) => t.notice === undefined),
+    "no stored turn doubles as a warning",
+  );
+  // --- 6. what actually reaches the model --------------------------------
+  captured.length = 0;
+  // A question that genuinely reaches back, so recall is expected here.
+  await ask(`on ${monthDay} we shortlisted CRM tools - is that still right?`, "shape-check");
+  const body = captured.at(-1);
+
+  check("the request reached the model", Boolean(body), body ? "captured" : "nothing captured");
+
+  if (body) {
+    const asked = body.messages.filter(
+      (m) => m.role === "user" && JSON.stringify(m.content).includes("we shortlisted CRM tools"),
+    );
+    check(
+      "the question is sent exactly once",
+      asked.length === 1,
+      `found ${asked.length} copies of the question`,
+    );
+
+    const roles = body.messages.map((m) => m.role);
+    const conversational = roles.filter((r) => r !== "system");
+    const alternates = conversational.every((r, i) => i === 0 || r !== conversational[i - 1]);
+    check("roles alternate", alternates && conversational[0] === "user", roles.join(" -> "));
+
+    const last = body.messages.at(-1);
+    check(
+      "recall rides in a trailing system message",
+      last.role === "system" && String(last.content).includes("earlier conversations"),
+      `last message is ${last.role}`,
+    );
+  }
+
+  // --- 7. a real second turn ---------------------------------------------
+  captured.length = 0;
+  await ask("and the second one?", "shape-check");
+  const followUp = captured.at(-1);
+  if (followUp) {
+    const roles = followUp.messages.filter((m) => m.role !== "system").map((m) => m.role);
+    check(
+      "the stored answer makes the next turn alternate properly",
+      roles.join(",") === "user,assistant,user",
+      roles.join(" -> "),
+    );
+  }
+  // --- 8. stopping mid-answer must not lose it ---------------------------
+  // Pins the behaviour rather than a specific failure: whatever the runtime
+  // does on disconnect, an answer that was paid for must reach the store.
+  const abort = new AbortController();
+  const inflight = fetch(`${BASE}/api/chat`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Cookie: COOKIE },
+    body: JSON.stringify({ conversationId: "aborted", message: "slow-please summarise this" }),
+    signal: abort.signal,
+  });
+
+  try {
+    const response = await inflight;
+    // Take the first chunk, then walk away mid-answer.
+    const reader = response.body.getReader();
+    await reader.read();
+    abort.abort();
+  } catch {
+    // An abort during read is the point of the exercise.
+  }
+
+  // Let the server finish the upstream stream and write the turn.
+  await new Promise((r) => setTimeout(r, 1500));
+
+  const afterAbort = await fetch(`${BASE}/api/conversation?id=aborted`, {
+    headers: { Cookie: COOKIE },
+  }).then((r) => r.json());
+  const roles = (afterAbort.turns ?? []).map((t) => t.role);
+  check(
+    "an answer the user stopped reading is still remembered",
+    roles.join(",") === "user,assistant",
+    `stored: ${roles.join(" -> ") || "nothing"}`,
+  );
 } finally {
   app.kill();
+  upstream.close();
 }
 
 const failed = results.filter((r) => !r).length;

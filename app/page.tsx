@@ -161,7 +161,7 @@ export default function Page() {
                 role: "assistant",
                 ts: new Date().toISOString(),
                 content: event.content,
-                text: event.notice,
+                notice: event.notice,
               },
             ]);
           }
@@ -354,7 +354,7 @@ function Turn({ turn, showDay }: { turn: StoredMessage; showDay: boolean }) {
         </div>
         {sources.length > 0 && <SourceList sources={sources} />}
         {body && <div className="bubble">{body}</div>}
-        {!isUser && turn.text && <div className="notice">{turn.text}</div>}
+        {turn.notice && <div className="notice">{turn.notice}</div>}
         {failures.length > 0 && (
           <div className="notice">Search failed: {failures.join(", ")}.</div>
         )}

@@ -21,8 +21,14 @@ export type StoredMessage = ApiMessage & {
   id: string;
   /** ISO-8601 time the turn was created. */
   ts: string;
-  /** The user's raw text, without the timestamp prefix. */
+  /** The turn's plain text, without the timestamp prefix. */
   text?: string;
+  /**
+   * A warning about this turn ("cut off at the length limit"). Kept separate
+   * from `text`: overloading one field meant a reloaded answer rendered
+   * twice, once as the reply and once as a warning.
+   */
+  notice?: string;
 };
 
 export type Source = { title: string; url: string };

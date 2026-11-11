@@ -186,10 +186,10 @@ test("search text from the user is never parsed as an FTS query", () => {
 test("recall is injected as a system message, after the question", () => {
   seed("old", "user", "postgres hosting options please", new Date(2026, 10, 3, 9, 0));
 
+  seed("new-thread", "user", "on 3 November I asked about postgres hosting - still right?", NOW);
   const built = context.buildContext(
     OWNER,
     "new-thread",
-    { role: "user", content: "[2026-11-11 14:00] on 3 November I asked about postgres hosting - still right?" },
     "on 3 November I asked about postgres hosting - still right?",
     NOW,
   );
@@ -202,13 +202,8 @@ test("recall is injected as a system message, after the question", () => {
 });
 
 test("no recall means no system message and an untouched prompt", () => {
-  const built = context.buildContext(
-    OWNER,
-    "c1",
-    { role: "user", content: "[2026-11-11 14:00] what is 2 + 2?" },
-    "what is 2 + 2?",
-    NOW,
-  );
+  seed("c1", "user", "what is 2 + 2?", NOW);
+  const built = context.buildContext(OWNER, "c1", "what is 2 + 2?", NOW);
   assert.equal(built.messages.length, 1);
   assert.equal(built.messages[0].role, "user");
   assert.deepEqual(built.recalled, []);
@@ -233,15 +228,59 @@ test("the timestamp prefix is not mistaken for a date the user named", () => {
   // turn paid for a recall nobody asked for.
   seed("c1", "user", "something from earlier today", new Date(2026, 10, 11, 9, 0));
 
-  const built = context.buildContext(
-    OWNER,
-    "c2",
-    { role: "user", content: "[2026-11-11 14:00] what is 2 + 2?" },
-    "what is 2 + 2?",
-    NOW,
-  );
+  const built = context.buildContext(OWNER, "c2", "what is 2 + 2?", NOW);
   assert.deepEqual(built.recalled, [], "a plain question must recall nothing");
 
   // The prefix alone must not resolve to a date either.
   assert.deepEqual(resolveDateReferences("what is 2 + 2?", NOW), []);
+});
+
+// --- request shape --------------------------------------------------------
+
+test("the question appears exactly once in the request", () => {
+  // The route stores the turn before building context, so the question is
+  // already the last turn of the thread. Appending it again sent every
+  // question to the model twice.
+  store.appendTurn(
+    { conversationId: "c1", role: "user", ts: NOW.getTime(), text: "hello", content: "[stamp] hello" },
+    OWNER,
+  );
+
+  const built = context.buildContext(OWNER, "c1", "hello", NOW);
+  const asked = built.messages.filter(
+    (m) => m.role === "user" && String(m.content).includes("hello"),
+  );
+  assert.equal(asked.length, 1, "the question must not be duplicated");
+  assert.equal(built.messages.length, 1);
+});
+
+test("a turn whose answer never arrived does not break role alternation", () => {
+  // The stream errored, so no assistant turn was stored. Two user turns in a
+  // row is a shape the Messages API rejects.
+  seed("c1", "user", "first question", new Date(2026, 10, 11, 9, 0));
+  seed("c1", "user", "second question", new Date(2026, 10, 11, 9, 5));
+
+  const built = context.buildContext(OWNER, "c1", "second question", NOW);
+  const roles = built.messages.filter((m) => m.role !== "system").map((m) => m.role);
+
+  assert.deepEqual(roles, ["user"], "consecutive user turns must be folded into one");
+  assert.match(String(built.messages[0].content), /first question/);
+  assert.match(String(built.messages[0].content), /second question/);
+});
+
+test("roles always alternate and the thread opens on the user", () => {
+  seed("c1", "assistant", "orphan answer from a trimmed window", new Date(2026, 10, 11, 8, 0));
+  seed("c1", "user", "q1", new Date(2026, 10, 11, 9, 0));
+  seed("c1", "assistant", "a1", new Date(2026, 10, 11, 9, 1));
+  seed("c1", "user", "q2", new Date(2026, 10, 11, 9, 2));
+
+  const roles = context
+    .buildContext(OWNER, "c1", "q2", NOW)
+    .messages.filter((m) => m.role !== "system")
+    .map((m) => m.role);
+
+  assert.equal(roles[0], "user", "a leading assistant turn must be dropped");
+  for (let i = 1; i < roles.length; i++) {
+    assert.notEqual(roles[i], roles[i - 1], `roles repeat at index ${i}`);
+  }
 });
