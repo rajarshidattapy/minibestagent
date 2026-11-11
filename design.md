@@ -1,123 +1,99 @@
 # Design: Minimal Web-Search Chat Agent
 
-A single-process chat agent with exactly one tool — web search — built to answer fast, answer correctly, and remember every question and when it was asked.
+A chat agent with exactly one tool — web search — built to answer fast, answer correctly, and remember every question and when it was asked. Implemented as a Next.js App Router app so it deploys with a single environment variable.
 
 ## Goals
 
-1. **Fast** — first token on screen in well under a second of model latency overhead; no client-side tool loop round-trips.
-2. **Right** — search the web whenever the answer could be stale or unknown; cite sources.
-3. **Remembers** — full conversation history with a timestamp on every user turn, so "what did I ask you this morning?" works.
+1. **Fast** — tokens on screen as they are generated; no client-side tool round-trips; flat latency as the conversation grows.
+2. **Right** — search the web whenever the answer could be stale or unknown, and cite sources.
+3. **Remembers** — the full transcript with a timestamp on every user turn, so "what did I ask you this morning?" works.
 
-## Architecture (one API call per turn)
+## Architecture: one API call per turn
 
 ```
-user input ──► append to history ──► POST /v1/messages (streaming) ──► stream text to user
-                     ▲                        │
-                     └── append response ◄────┘
-                         content blocks
+browser                            /api/chat (stateless)         Anthropic
+───────                            ─────────────────────         ─────────
+transcript in localStorage
+  + new user turn  ──── POST ────►  stream Messages request ────►  Claude
+                                                                     │
+                                                                  web search
+                                                                  (server-side)
+                                                                     │
+  render deltas  ◄──── NDJSON ────  forward text + status    ◄───────┘
+  append blocks  ◄──── "done"  ───  final content blocks
 ```
 
-There is deliberately **no agent framework and no client-side tool loop**. The one tool is Anthropic's **server-side web search tool** (`web_search_20260209`): Claude decides when to search, the search runs on Anthropic's infrastructure, and results come back inside the same response. One request per user turn is the entire control flow, which is what makes the agent both simple and fast.
+There is deliberately **no agent framework and no client-side tool loop**. The one tool is Anthropic's **server-side web search tool** (`web_search_20260209`): Claude decides when to search, the search executes on Anthropic's infrastructure, and the results arrive inside the same response. One request per user turn is the entire control flow — which is what makes the agent both simple and fast.
+
+The route handler is **stateless**. It holds no session, writes no files, and needs no database, so it runs identically on Vercel, Fly, a container, or a laptop.
 
 ## Model and request shape
 
+`app/api/chat/route.ts`
+
 | Setting | Value | Why |
 |---|---|---|
-| Model | `claude-opus-5-5` | Current default Opus: strong, cheap ($4/$20 per MTok), 1M context. |
-| Thinking | omit (adaptive, always on) | Opus 5.5 rejects `disabled`; adaptive adds depth only when needed. |
-| Effort | `output_config: {effort: "low"}` | Chat is latency-sensitive; low effort means less preamble, faster answers. Opus 5.5 defaults to `medium`, so set it explicitly. |
-| Streaming | always (`.stream()` + `get_final_message()`) | Tokens appear as generated — the dominant factor in *perceived* speed. |
+| Model | `claude-opus-5-5` | Current default Opus: strong, 1M context, $4/$20 per MTok. |
+| Thinking | omitted | On this model omitting it *is* adaptive thinking. `disabled` and `budget_tokens` are both rejected with a 400. |
+| Effort | `output_config: { effort: "low" }` | Chat is latency-sensitive; low effort means less preamble and a faster first answer. The model defaults to `medium`, so this is set explicitly. |
+| Streaming | always | Perceived speed is dominated by time-to-first-token, not total time. |
 | `max_tokens` | 16000 | Room for a searched, cited answer without risking truncation. |
-| Fallbacks | `betas: ["server-side-fallback-2026-07-01"]`, `fallbacks: "default"` | If a safety classifier declines (`stop_reason: "refusal"`), the API retries on a fallback model automatically instead of showing the user an error. |
+| Caching | top-level `cache_control: { type: "ephemeral" }` | Automatic prefix caching — no manual breakpoint placement to get wrong. |
+| Fallbacks | `betas: ["server-side-fallback-2026-07-01"]`, `fallbacks: "default"` | If a safety classifier declines (`stop_reason: "refusal"`), the server retries on a fallback model instead of handing the user an error. |
 
 ### The one tool
 
-```json
-{
-  "type": "web_search_20260209",
-  "name": "web_search",
-  "max_uses": 5
-}
+```ts
+{ type: "web_search_20260209", name: "web_search", max_uses: 5 }
 ```
 
-- `max_uses: 5` caps latency on any single turn.
-- The `_20260209` variant does dynamic filtering internally — do **not** also declare a code-execution tool.
-- **Error handling:** search errors return HTTP 200 with an error *object* (not a list) in the `web_search_tool_result` block's `content` — branch on that shape, never index blindly.
-- **`pause_turn`:** if `stop_reason == "pause_turn"`, append the response content and re-send immediately; it's the server pausing a long search turn, not an error.
+- `max_uses: 5` caps worst-case latency on any single turn.
+- The `_20260209` variant does dynamic filtering internally, so no code-execution tool is declared alongside it.
+- **Search errors do not throw.** They return HTTP 200 with an error *object* where the result *list* would be. `extractSources` checks `Array.isArray` before iterating, and `searchErrors` surfaces the `error_code` to the user rather than silently showing an uncited answer. Both are covered by a test.
+- **`pause_turn` is not an error.** It means the server paused a long search. The route replays the partial assistant turn and lets it continue, up to `MAX_RESUMES = 4`; resumed blocks are **merged into the one assistant turn** so history stays strictly alternating. If it is still paused at the cap, the user is told the search ran long instead of being shown a truncated answer as if it were complete.
 
-### System prompt (short, frozen)
+### System prompt
 
-```
-You are a concise, accurate chat assistant with web search.
-- Search when the answer involves current events, prices, versions,
-  schedules, or anything you are not certain of. Otherwise answer directly.
-- Cite sources for searched facts.
-- Each user message is prefixed with its timestamp; use these to answer
-  questions about what was asked and when.
-```
-
-Frozen byte-for-byte: the current date/time lives in each user message, never here (see caching).
+Frozen byte-for-byte — the clock lives in each user message, never in the system prompt, because a timestamp here would invalidate the cache prefix on every single turn. It covers: when to search and when not to, cite sources, lead with the answer, read the per-message timestamps, and never invent a fact or a citation.
 
 ## Memory: what was asked, and when
 
-Memory is the message history itself — no vector DB, no summaries to drift out of sync.
+Memory is the transcript itself — no vector store, no summarisation that can drift out of sync with what was actually said.
 
-1. **App-side log**: every turn is appended to a JSONL file: `{role, content, ts}` with an ISO-8601 timestamp. This survives restarts and is the source of truth.
-2. **In-context timestamps**: each user message is sent as
-   `[2026-11-11 14:32 local] <user's text>` — so the model itself can answer "when did I ask about X?".
-3. **Append-only history**: after every response, append the **full `response.content` block list** (not just the text) back onto `messages`. This is required anyway — Opus 5.5's preserved-thinking check rejects edited history, and compaction blocks must round-trip intact.
-4. **Long conversations**: 1M context covers weeks of chat. Beyond that, enable server-side **compaction** (beta header `compact-2026-01-12`); the API summarizes old turns automatically at ~150K tokens. Because the JSONL log is kept separately, nothing is ever truly lost even after compaction.
+1. **Durable log in the browser.** `app/page.tsx` keeps the transcript in `localStorage`. This is what makes the server stateless and the deploy one variable; it survives refreshes, and it is per-device by construction. Moving it to a database means changing where the page loads and saves — the API route never needs to know.
+2. **In-context timestamps.** Each user message is sent as `[2026-11-11 14:32] <text>`, in the user's own timezone. That is how the model itself can answer "when did I ask about X?" — no tool call, no retrieval step. The raw text and the ISO timestamp are stored alongside for rendering, so the prefix never shows up in the UI.
+3. **Verbatim, append-only history.** The **full content-block array** from each response is stored and replayed, not just the extracted text. This matters: thinking blocks and search results must round-trip unchanged, Opus 5.5's preserved-thinking check rejects edited history, and compaction blocks are what the API uses to replace compacted turns. Turns are only ever appended.
+4. **Long conversations.** 1M context covers a very long chat. Beyond that, enable server-side compaction (beta `compact-2026-01-12`) and the API summarises old turns at ~150K tokens automatically; because the browser keeps the raw transcript separately, the human-readable record is never lost.
 
-## Speed: prompt caching
+## Speed
 
-Latency and cost per turn stay flat as history grows by caching the stable prefix:
+- **Streaming end to end.** The route forwards NDJSON frames (`status`, `text`, `done`, `error`) as they arrive, with `X-Accel-Buffering: no` so a proxy cannot quietly turn streaming back into batching.
+- **Prompt caching.** Render order is `tools → system → messages`; the tool list and system prompt never change, so everything up to the newest turn is a cache hit at $0.20/MTok. Verify with `usage.cache_read_input_tokens > 0` from turn two onward — zero means a silent invalidator crept into the prefix.
+- **Low effort.** The largest single lever on chat latency, and the cheapest to set.
+- **Visible progress.** A *Searching for "…"* indicator appears the moment the query is parsed out of the streamed tool input, so a multi-second search never looks like a hang.
 
-- Render order is `tools → system → messages`; the tool list and system prompt never change, so everything up to the last turn is a cache hit.
-- Put `cache_control: {type: "ephemeral"}` on the last message of the prior history each turn.
-- Timestamps go **inside new user messages only** — a timestamp in the system prompt would invalidate the whole cache every turn.
-- Verify in logs: `usage.cache_read_input_tokens > 0` on turn 2 onward; zero means a silent invalidator crept in.
+## Honesty and failure modes
 
-Net effect per turn: one streamed request, ~90% of input tokens read from cache at $0.20/MTok.
+Every path that produces an incomplete answer says so, rather than rendering a partial reply as if it were whole:
 
-## Error handling
+| Condition | Behaviour |
+|---|---|
+| `stop_reason: "max_tokens"` | Text is kept, with "this answer was cut off at the length limit". |
+| `stop_reason: "refusal"` | Server-side fallback usually handles it; if the fallback also declines, the user is told. |
+| `stop_reason: "pause_turn"` at the resume cap | "The search ran long and was stopped before finishing." |
+| Search returned an error object | "Search failed: `<error_code>`." |
+| Auth / rate limit / connection | Specific-first error chain (`AuthenticationError` → `RateLimitError` → `APIConnectionError` → `APIError`), sent as an `error` frame. |
 
-Most-specific-first chain: `RateLimitError` (retry with backoff — SDK already retries twice) → `APIStatusError` (surface message) → `APIConnectionError` (retry once, then tell the user). Check `stop_reason` before reading content: `refusal` is handled by the server-side fallback; `max_tokens` means the answer was cut — tell the user rather than silently showing a truncated reply.
+## What is intentionally left out
 
-## What's intentionally left out
+- **No RAG or vector memory** — transcript plus inline timestamps already answers "what did I ask, and when"; at this scale 1M context makes retrieval pure overhead.
+- **No client-side tool loop or tool runner** — the only tool runs on Anthropic's servers.
+- **No multi-model routing** — one model is one cache namespace, and low effort on Opus 5.5 is already fast.
+- **No CSS framework or component library** — one stylesheet, zero runtime dependencies in the UI.
+- **No server-side storage** — the thing that would otherwise turn a one-variable deploy into infrastructure.
 
-- **No RAG / vector memory** — history + timestamps in context already answers "what/when did I ask"; 1M context makes retrieval unnecessary at this scale.
-- **No client-side tool loop / tool runner** — the only tool is server-side.
-- **No multi-model routing** — one model keeps one cache namespace; low effort on Opus 5.5 is already fast.
-- **No framework** — the whole agent is a system prompt, a JSONL file, and one streaming API call in a loop.
+## Tests
 
-## Pseudocode
+`lib/chat.test.ts` (`npm run test`) covers the parsing layer, where silent breakage would otherwise live: NDJSON frames reassembled across chunk boundaries that do not align with newlines, citation extraction and URL dedupe, the failed-search error object that must not be indexed as a list, text extraction across mixed block types, and the local-time stamp the model is handed.
 
-```python
-client = Anthropic()
-history = load_jsonl()  # [{role, content}], timestamps already inline
-
-while True:
-    text = input("> ")
-    user_msg = {"role": "user", "content": f"[{now_iso()}] {text}"}
-    history.append(user_msg); log(user_msg)
-
-    while True:
-        with client.beta.messages.stream(
-            model="claude-opus-5-5",
-            max_tokens=16000,
-            output_config={"effort": "low"},
-            system=SYSTEM_PROMPT,
-            tools=[{"type": "web_search_20260209", "name": "web_search", "max_uses": 5}],
-            betas=["server-side-fallback-2026-07-01"],
-            fallbacks="default",
-            messages=with_cache_breakpoint(history),
-        ) as stream:
-            for chunk in stream.text_stream:
-                print(chunk, end="", flush=True)
-            msg = stream.get_final_message()
-
-        history.append({"role": "assistant", "content": msg.content})
-        log_assistant(msg)
-        if msg.stop_reason != "pause_turn":
-            break
-```
+Verified locally: `npm run test` (5/5), `npm run typecheck`, `npm run build`, and the route's streaming, validation, and error paths over HTTP. Live model output needs a real `ANTHROPIC_API_KEY`.
