@@ -1,0 +1,6 @@
+[Unit]
+Description=Snapshot the mini-chat SQLite database to S3
+
+[Service]
+Type=oneshot
+ExecStart=/opt/mini-chat-backup.sh

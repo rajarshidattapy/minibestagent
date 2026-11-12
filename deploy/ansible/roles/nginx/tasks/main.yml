@@ -1,0 +1,66 @@
+---
+- name: Install nginx
+  ansible.builtin.apt:
+    name: nginx
+    state: present
+
+- name: Remove the default site
+  ansible.builtin.file:
+    path: /etc/nginx/sites-enabled/default
+    state: absent
+
+- name: Install the app's site config
+  ansible.builtin.template:
+    src: mini-chat.conf.j2
+    dest: /etc/nginx/sites-available/mini-chat.conf
+    mode: "0644"
+  register: nginx_conf
+
+- name: Enable it
+  ansible.builtin.file:
+    src: /etc/nginx/sites-available/mini-chat.conf
+    dest: /etc/nginx/sites-enabled/mini-chat.conf
+    state: link
+
+- name: Reload nginx if the config changed
+  ansible.builtin.systemd_service:
+    name: nginx
+    state: reloaded
+    enabled: true
+  when: nginx_conf.changed
+
+- name: Make sure nginx is at least running and enabled
+  ansible.builtin.systemd_service:
+    name: nginx
+    state: started
+    enabled: true
+
+# --- TLS, only when there is a real domain to issue a certificate for -----
+
+- name: Install certbot and its nginx plugin
+  ansible.builtin.apt:
+    name: [certbot, python3-certbot-nginx]
+    state: present
+  when: app_domain != ""
+
+- name: Issue and install the certificate (certbot edits the nginx config itself)
+  ansible.builtin.command: >-
+    certbot --nginx
+    -d {{ app_domain }}
+    --non-interactive --agree-tos --redirect
+    -m {{ letsencrypt_email }}
+  args:
+    # Running this again is safe, but there is no reason to hit Let's
+    # Encrypt's (rate-limited) API on every playbook run once a valid
+    # cert already exists - renewal is certbot's own systemd timer's job,
+    # installed automatically by the apt package, not this task's.
+    creates: "/etc/letsencrypt/live/{{ app_domain }}/fullchain.pem"
+  when: app_domain != "" and letsencrypt_email != ""
+
+- name: Refuse to silently skip TLS because of a missing email
+  ansible.builtin.fail:
+    msg: >-
+      app_domain is set but letsencrypt_email is not - certbot needs a
+      contact address. Set LETSENCRYPT_EMAIL (or terraform's
+      letsencrypt_email variable) and re-run.
+  when: app_domain != "" and letsencrypt_email == ""

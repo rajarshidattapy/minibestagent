@@ -1,0 +1,35 @@
+[Unit]
+Description=mini-chat (Next.js standalone server)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{ app_user }}
+Group={{ app_user }}
+WorkingDirectory={{ app_dir }}/.next/standalone
+
+# Non-secret, deploy-specific config. Secrets (ANTHROPIC_API_KEY, OIDC_*,
+# METRICS_TOKEN) come from {{ secrets_env_file }}, which roles/app's
+# fetch-secrets.py regenerates from SSM Parameter Store on every deploy and
+# which only this unit (and root) can read.
+Environment=NODE_ENV=production
+Environment=PORT={{ app_port }}
+Environment=HOSTNAME=127.0.0.1
+Environment=MEMORY_DB_PATH={{ data_dir }}/mini.db
+EnvironmentFile={{ secrets_env_file }}
+
+ExecStart=/usr/bin/node server.js
+Restart=on-failure
+RestartSec=5
+
+# Nothing here needs to touch the filesystem outside its own data
+# directory and /tmp.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths={{ data_dir }}
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

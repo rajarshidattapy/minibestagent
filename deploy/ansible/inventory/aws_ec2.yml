@@ -1,0 +1,39 @@
+# Dynamic inventory: this always targets exactly what deploy/terraform
+# created, filtered on the tag it sets - there is no IP address copy-pasted
+# in here for Terraform and Ansible to quietly drift apart on.
+#
+# Two environment variables are expected before running Ansible (both are
+# Terraform outputs - run `terraform output` to get them):
+#
+#   export ANSIBLE_AWS_SSM_BUCKET=$(terraform -chdir=../terraform output -raw ansible_transfer_bucket)
+#   export AWS_DEFAULT_REGION=$(terraform -chdir=../terraform output -raw aws_region 2>/dev/null || echo us-east-1)
+#
+# Normal AWS credential resolution applies for the controller itself (env
+# vars, ~/.aws/credentials, an assumed role, instance profile if Ansible
+# runs from another AWS box) - nothing AWS-specific needs to be configured
+# in this repo beyond that.
+plugin: amazon.aws.aws_ec2
+
+filters:
+  tag:Project: mini-chat
+  instance-state-name: running
+
+# EC2 has no public DNS name without a public IP association re-enabled by
+# default on every launch; the Elastic IP is the stable address, so name
+# hosts by instance-id and let aws_ssm connect by instance-id directly -
+# nothing here needs to resolve a hostname or IP at all.
+hostnames:
+  - instance-id
+
+compose:
+  ansible_connection: "'amazon.aws.aws_ssm'"
+  ansible_aws_ssm_instance_id: instance_id
+  ansible_aws_ssm_region: "lookup('ansible.builtin.env', 'AWS_DEFAULT_REGION', default='us-east-1')"
+  ansible_aws_ssm_bucket_name: "lookup('ansible.builtin.env', 'ANSIBLE_AWS_SSM_BUCKET')"
+  # SSM's shell is plain sh underneath - be explicit rather than let
+  # Ansible guess from a hostname that doesn't look like anything.
+  ansible_shell_type: sh
+  ansible_python_interpreter: /usr/bin/python3
+
+groups:
+  app: true

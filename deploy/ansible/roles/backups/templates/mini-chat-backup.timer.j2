@@ -1,0 +1,12 @@
+[Unit]
+Description=Run the mini-chat backup nightly
+
+[Timer]
+OnCalendar=*-*-* 03:00:00
+# If the instance was off/rebooting at 03:00, run it as soon as it's back
+# rather than silently waiting a full day for the next window.
+Persistent=true
+RandomizedDelaySec=600
+
+[Install]
+WantedBy=timers.target

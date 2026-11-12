@@ -1,0 +1,19 @@
+---
+# ansible-playbook site.yml
+#
+# Order matters: the data volume has to be mounted before the app role
+# tries to point MEMORY_DB_PATH at it, Node has to exist before `npm ci`
+# does, and nginx needs the app already listening on 127.0.0.1:3000 before
+# its config can reasonably be reloaded.
+- name: Configure the mini-chat instance
+  hosts: app
+  become: true
+  gather_facts: true
+
+  roles:
+    - common
+    - node
+    - app
+    - nginx
+    - backups
+    - cloudwatch

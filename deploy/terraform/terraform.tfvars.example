@@ -1,0 +1,22 @@
+# Copy to terraform.tfvars and edit. Never commit the real file - it's
+# already in .gitignore, but double-check before anything with a real
+# domain or account ID goes near a commit.
+
+aws_region    = "us-east-1"
+project       = "mini-chat"
+environment   = "prod"
+instance_type = "t3.small"
+
+data_volume_size_gb = 20
+
+# Leave as-is for a first smoke test; narrow to your own IP/VPN range once
+# this is doing anything real.
+allowed_http_cidrs = ["0.0.0.0/0"]
+
+# Leave both blank to skip TLS and DNS entirely and just hit the Elastic IP
+# over HTTP - fine for a first look, not for real traffic.
+app_domain        = ""
+route53_zone_id   = ""
+letsencrypt_email = ""
+
+ssm_parameter_path = "/mini-chat/prod"

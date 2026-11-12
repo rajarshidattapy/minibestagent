@@ -1,0 +1,27 @@
+---
+- name: Install the backup script
+  ansible.builtin.template:
+    src: backup.sh.j2
+    dest: /opt/mini-chat-backup.sh
+    mode: "0700"
+
+- name: Install the backup service and timer
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "/etc/systemd/system/{{ item }}"
+    mode: "0644"
+  loop:
+    - mini-chat-backup.service
+    - mini-chat-backup.timer
+  register: backup_units
+
+- name: Reload systemd if the units changed
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  when: backup_units.changed
+
+- name: Enable and start the backup timer
+  ansible.builtin.systemd_service:
+    name: mini-chat-backup.timer
+    enabled: true
+    state: started

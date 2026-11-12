@@ -1,0 +1,2 @@
+---
+secrets_env_file: /etc/mini-chat.env

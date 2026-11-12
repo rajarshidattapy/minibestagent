@@ -1,0 +1,86 @@
+---
+- name: Clone/update the app
+  ansible.builtin.git:
+    repo: "{{ app_repo }}"
+    dest: "{{ app_dir }}/src"
+    version: "{{ app_ref }}"
+    force: true
+  become_user: "{{ app_user }}"
+  register: app_checkout
+
+- name: Install dependencies (npm ci, from the committed lockfile)
+  ansible.builtin.command: npm ci
+  args:
+    chdir: "{{ app_dir }}/src"
+  become_user: "{{ app_user }}"
+  environment:
+    HOME: "{{ app_dir }}"
+  register: npm_ci
+  # A heuristic, not a precise "did the lockfile actually change" check -
+  # `npm ci` always wipes and reinstalls node_modules, so this is reading
+  # its own summary line rather than detecting a real no-op. Good enough to
+  # decide whether a rebuild is worth triggering; not a correctness claim.
+  changed_when: "'added' in npm_ci.stdout or 'removed' in npm_ci.stdout or 'changed' in npm_ci.stdout"
+
+- name: Check whether a standalone build already exists
+  ansible.builtin.stat:
+    path: "{{ app_dir }}/src/.next/standalone/server.js"
+  register: existing_build
+
+- name: 'Build (output: "standalone" in next.config.ts - see DESIGN.md)'
+  ansible.builtin.command: npm run build
+  args:
+    chdir: "{{ app_dir }}/src"
+  become_user: "{{ app_user }}"
+  environment:
+    HOME: "{{ app_dir }}"
+    NODE_ENV: production
+  register: app_build
+  # Rebuilding is the point whenever the checkout moved or deps changed;
+  # a fresh checkout with no prior build at all still needs a first one.
+  when: app_checkout.changed or npm_ci.changed or not existing_build.stat.exists
+
+- name: Next.js's standalone output does not include static assets - copy them in
+  ansible.builtin.command: >-
+    cp -r {{ app_dir }}/src/.next/static
+    {{ app_dir }}/src/.next/standalone/.next/static
+  when: app_build is not skipped and app_build.changed
+
+- name: Copy public/ into the standalone output too, if it exists
+  ansible.builtin.copy:
+    src: "{{ app_dir }}/src/public/"
+    dest: "{{ app_dir }}/src/.next/standalone/public/"
+    remote_src: true
+  when: app_build is not skipped and app_build.changed
+  ignore_errors: true # the project currently has no public/ directory; harmless either way
+
+- name: Fetch secrets from SSM Parameter Store into the systemd EnvironmentFile
+  ansible.builtin.template:
+    src: fetch-secrets.py.j2
+    dest: /opt/fetch-mini-chat-secrets.py
+    mode: "0700"
+  register: fetch_script
+
+- name: Run it - root only, so the resulting file is root:root 0600
+  ansible.builtin.command: /usr/bin/python3 /opt/fetch-mini-chat-secrets.py
+  register: secrets_fetch
+  changed_when: "'wrote' in secrets_fetch.stdout"
+  no_log: true # the script's own stdout never includes a secret value, but this is the boundary where a mistake would show up
+
+- name: Install the systemd unit
+  ansible.builtin.template:
+    src: mini-chat.service.j2
+    dest: /etc/systemd/system/mini-chat.service
+    mode: "0644"
+  register: unit_file
+
+- name: Reload systemd if the unit changed
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  when: unit_file.changed
+
+- name: Enable and (re)start the app
+  ansible.builtin.systemd_service:
+    name: mini-chat
+    enabled: true
+    state: "{{ 'restarted' if (unit_file.changed or (app_build is not skipped and app_build.changed) or secrets_fetch.changed) else 'started' }}"

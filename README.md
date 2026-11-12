@@ -114,7 +114,10 @@ npm run build
 
 ## Notes
 
-- **The transcript is the memory.** Each message you send is stamped with your local time before it goes to the model, so "what did I ask you this morning?" is a question it can actually answer. History lives in your browser and survives refreshes; **Clear** wipes it.
-- **It searches when it should.** The model decides; you will see *Searching for "…"* and a row of source links on any answer that used the web.
-- **Nothing is stored on the server.** Swapping in a database means changing where `app/page.tsx` loads and saves the transcript — the API route never needs to know.
+- **The transcript is the memory, and it lives on the server now, not in the browser.** Each message is stamped with its local time before it goes to the model, so "what did I ask you this morning?" is a question it can actually answer, and the answer survives a cleared cache, a restart, or signing in from a different device - see "Memory" above.
+- **It searches when it should.** The model decides; you'll see *Searching for "…"* and a row of source links on any answer that used the web.
+
+## Deploying it
+
+`deploy/` has Terraform and Ansible for putting this on a real AWS box - one instance, by design (see `DESIGN.md`), with no SSH keys, secrets pulled from SSM Parameter Store by the instance's own role, and nightly backups of the SQLite file to S3. `deploy/README.md` has the full walkthrough.
 

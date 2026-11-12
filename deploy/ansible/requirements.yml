@@ -1,0 +1,17 @@
+# ansible-galaxy collection install -r requirements.yml
+collections:
+  # Ships both the aws_ec2 dynamic inventory plugin and the aws_ssm
+  # connection plugin - verified against the real plugin source before
+  # writing this, since there is an older, now-incorrect belief floating
+  # around that aws_ssm lives in community.aws. It does not; it is here.
+  - name: amazon.aws
+    version: ">=12.0.0"
+  # The `mount` module, used by roles/common to attach the data volume.
+  - name: ansible.posix
+    version: ">=2.0.0"
+  # `community.general.filesystem` - formats the data volume. Verified
+  # against the real collection contents before writing this; `mount` and
+  # `filesystem` are commonly assumed to live in the same collection and do
+  # not.
+  - name: community.general
+    version: ">=9.0.0"

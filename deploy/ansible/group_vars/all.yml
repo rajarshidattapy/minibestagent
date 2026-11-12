@@ -1,0 +1,50 @@
+---
+# Everything here either has a sane default or is read from an environment
+# variable set by hand or copied from `terraform output` - nothing here is
+# a secret. Secrets live in SSM Parameter Store (see roles/app) and are
+# never written to disk in this repo in any form.
+
+project: mini-chat
+# Matches terraform's `environment` variable - keep them in sync by hand
+# (or export ENVIRONMENT before running Ansible) rather than guessing.
+environment_name: "{{ lookup('ansible.builtin.env', 'ENVIRONMENT', default='prod') }}"
+
+# Where the app's own files live, and where its data volume is mounted.
+# These two being different paths is what makes `common`'s mount task safe
+# to re-run: the data directory only becomes "the EBS volume" after it is
+# actually mounted there, so Ansible is never one re-run away from writing
+# the database onto the root volume by accident.
+app_dir: /opt/mini-chat
+data_dir: /data
+app_user: miniapp
+
+# What gets deployed. Point APP_REF at a tag or commit once this is doing
+# anything real - "master" is fine for a first apply, not for a repeatable
+# one.
+app_repo: "{{ lookup('ansible.builtin.env', 'APP_REPO', default='https://github.com/rajarshidattapy/minibestagent.git') }}"
+app_ref: "{{ lookup('ansible.builtin.env', 'APP_REF', default='master') }}"
+
+# Node.js major version to install. Pinned to match exactly what this
+# project has been built and tested against throughout development - not a
+# guess at "whatever LTS is current", because node:sqlite's stability
+# depends on the Node version and this is the one actually exercised.
+node_major: "26"
+
+app_port: 3000
+
+# Matches terraform's ssm_parameter_path variable - the path the instance's
+# IAM role is allowed to read, and where you created the real secrets by
+# hand (see deploy/README.md).
+ssm_parameter_path: "{{ lookup('ansible.builtin.env', 'SSM_PARAMETER_PATH', default='/' ~ project ~ '/' ~ environment_name) }}"
+
+# Matches terraform's app_domain variable. Blank skips TLS/certbot entirely
+# and nginx serves plain HTTP - fine for a first look, not for real use.
+app_domain: "{{ lookup('ansible.builtin.env', 'APP_DOMAIN', default='') }}"
+letsencrypt_email: "{{ lookup('ansible.builtin.env', 'LETSENCRYPT_EMAIL', default='') }}"
+
+# Matches terraform's `backups_bucket` output.
+backups_bucket: "{{ lookup('ansible.builtin.env', 'BACKUPS_BUCKET') }}"
+backups_retention_days: 14
+
+cloudwatch_log_group: "/{{ project }}/{{ environment_name }}/app"
+aws_region: "{{ lookup('ansible.builtin.env', 'AWS_DEFAULT_REGION', default='us-east-1') }}"

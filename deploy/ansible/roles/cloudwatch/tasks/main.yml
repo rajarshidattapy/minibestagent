@@ -1,0 +1,41 @@
+---
+# Verified against the real, live artifact before writing this - AWS's own
+# docs page for this is client-rendered and doesn't show its content to a
+# plain fetch, so the URL below was confirmed by actually requesting it,
+# not copied from a half-remembered guide.
+
+- name: Check whether the agent is already installed
+  ansible.builtin.stat:
+    path: /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl
+  register: cwagent_bin
+
+- name: Download the CloudWatch agent package
+  ansible.builtin.get_url:
+    url: "https://amazoncloudwatch-agent-{{ aws_region }}.s3.{{ aws_region }}.amazonaws.com/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb"
+    dest: /tmp/amazon-cloudwatch-agent.deb
+    mode: "0644"
+  when: not cwagent_bin.stat.exists
+
+- name: Install it
+  ansible.builtin.apt:
+    deb: /tmp/amazon-cloudwatch-agent.deb
+  when: not cwagent_bin.stat.exists
+
+- name: Write the agent config (nginx's files + the app's journald unit)
+  ansible.builtin.template:
+    src: config.json.j2
+    dest: /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
+    mode: "0644"
+  register: cwagent_config
+
+- name: Apply the config and (re)start the agent
+  ansible.builtin.command: >-
+    /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl
+    -a fetch-config -m ec2 -s
+    -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
+  when: cwagent_config.changed or not cwagent_bin.stat.exists
+
+- name: Make sure it's enabled across reboots
+  ansible.builtin.systemd_service:
+    name: amazon-cloudwatch-agent
+    enabled: true

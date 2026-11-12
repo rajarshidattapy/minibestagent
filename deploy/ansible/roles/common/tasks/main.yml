@@ -1,0 +1,138 @@
+---
+- name: Update apt cache
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Install base packages
+  ansible.builtin.apt:
+    name:
+      - curl
+      - ca-certificates
+      - gnupg
+      - unzip
+      - sqlite3
+      - git
+    state: present
+
+- name: Check whether the AWS CLI is already installed
+  ansible.builtin.stat:
+    path: /usr/local/bin/aws
+  register: aws_cli_bin
+
+- name: Download the AWS CLI v2 installer
+  ansible.builtin.get_url:
+    url: https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip
+    dest: /tmp/awscliv2.zip
+    mode: "0644"
+  when: not aws_cli_bin.stat.exists
+
+- name: Unpack the AWS CLI installer
+  ansible.builtin.unarchive:
+    src: /tmp/awscliv2.zip
+    dest: /tmp
+    remote_src: true
+  when: not aws_cli_bin.stat.exists
+
+- name: Install the AWS CLI
+  ansible.builtin.command: /tmp/aws/install
+  when: not aws_cli_bin.stat.exists
+
+- name: Create the app's unprivileged system user
+  ansible.builtin.user:
+    name: "{{ app_user }}"
+    system: true
+    home: "{{ app_dir }}"
+    create_home: false
+    shell: /usr/sbin/nologin
+
+- name: Create the app and data directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ app_user }}"
+    group: "{{ app_user }}"
+    mode: "0750"
+  loop:
+    - "{{ app_dir }}"
+    - "{{ data_dir }}"
+
+# --- the data volume -------------------------------------------------------
+#
+# Nitro instances (t3.* included) expose EBS volumes as NVMe devices to the
+# kernel, not under the /dev/sdf name Terraform requested at attach time -
+# that name is not reliable to mount by. AWS's own guidance, and the one
+# thing that *is* stable, is that the kernel's standard udev rules expose
+# every NVMe device's controller serial number under /dev/disk/by-id/, and
+# AWS sets that serial to the EBS volume ID. So: ask AWS which volume is
+# attached to this instance (the only reliable source of truth), and mount
+# by that id - never by a guessed device name.
+
+- name: Look up the data volume actually attached to this instance
+  amazon.aws.ec2_vol_info:
+    region: "{{ ansible_aws_ssm_region }}"
+    filters:
+      attachment.instance-id: "{{ ansible_aws_ssm_instance_id }}"
+      attachment.device: /dev/sdf
+  delegate_to: localhost
+  become: false
+  register: data_volume_info
+
+- name: Fail loudly if the data volume cannot be found
+  ansible.builtin.fail:
+    msg: >-
+      No EBS volume is attached to {{ ansible_aws_ssm_instance_id }} at
+      /dev/sdf. Has `terraform apply` finished? Refusing to guess a device
+      name for where the database lives.
+  when: data_volume_info.volumes | length == 0
+
+- name: Resolve the stable by-id device path for the data volume
+  ansible.builtin.set_fact:
+    data_device: "/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_{{ data_volume_info.volumes[0].id | regex_replace('^vol-', 'vol') }}"
+
+- name: Check whether the data volume already has a filesystem
+  ansible.builtin.command: "blkid {{ data_device }}"
+  changed_when: false
+  failed_when: false
+  register: data_blkid
+
+- name: Format the data volume
+  community.general.filesystem:
+    fstype: ext4
+    dev: "{{ data_device }}"
+  # blkid's exit code is 2 when the device has no recognisable filesystem
+  # at all - the one and only condition under which formatting is safe.
+  # Anything else (including "command not found") is treated as "do not
+  # touch this device".
+  when: data_blkid.rc == 2
+
+- name: Mount the data volume
+  ansible.posix.mount:
+    path: "{{ data_dir }}"
+    src: "{{ data_device }}"
+    fstype: ext4
+    opts: defaults,nofail
+    state: mounted
+
+- name: Data directory is owned by the app user even after mounting
+  ansible.builtin.file:
+    path: "{{ data_dir }}"
+    state: directory
+    owner: "{{ app_user }}"
+    group: "{{ app_user }}"
+    mode: "0750"
+
+- name: Enable unattended security updates
+  ansible.builtin.apt:
+    name: unattended-upgrades
+    state: present
+
+- name: Configure unattended-upgrades for security updates only
+  ansible.builtin.copy:
+    dest: /etc/apt/apt.conf.d/52unattended-upgrades-security
+    content: |
+      Unattended-Upgrade::Allowed-Origins {
+        "${distro_id}:${distro_codename}-security";
+      };
+      Unattended-Upgrade::Remove-Unused-Dependencies "true";
+    mode: "0644"

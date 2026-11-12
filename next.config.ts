@@ -55,6 +55,11 @@ const securityHeaders = [
 const nextConfig: NextConfig = {
   // Do not advertise the framework version.
   poweredByHeader: false,
+  // A self-contained server bundle for deploy/ (EC2 + systemd, not a
+  // serverless platform) - this app keeps its memory and cache in a local
+  // SQLite file, which needs one long-lived process and a real disk, not an
+  // ephemeral per-invocation filesystem.
+  output: "standalone",
   async headers() {
     return [{ source: "/:path*", headers: securityHeaders }];
   },
